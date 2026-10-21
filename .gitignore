@@ -1,0 +1,5 @@
+/lam
+/dist/
+/coverage.out
+/coverage.html
+*.test
