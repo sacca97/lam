@@ -84,13 +84,13 @@ lam remote --listen
 lam remote fedora
 ```
 
-`lam remote --listen` configures the daemon to listen on all interfaces at port `7420`; use
+`lam remote --listen` configures the daemon to listen on all interfaces at port `42000`; use
 `lam remote --disable` to turn it off. Install the daemon with `lam install-service` if it is not
 already running. The client authenticates to the remote host over SSH once, requests a
 short-lived, single-use TCP ticket, and opens one TCP connection. Requests and every attached
 session share that connection (compressed, with flow control), so switching sessions costs a single
 round trip and no further logins. No key is copied between devices. The TCP stream is unencrypted,
-so firewall port `7420` to your VPN network. `lam ssh` uses the same protocol over a single SSH
+so firewall port `42000` to your VPN network. `lam ssh` uses the same protocol over a single SSH
 connection. Both ends must run the same version of `lam`; an older remote host is refused with a
 message asking you to update it.
 

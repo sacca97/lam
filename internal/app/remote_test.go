@@ -35,11 +35,11 @@ func TestNormalizeRemoteTCPAddressDefaultsPortAndKeepsOverrides(t *testing.T) {
 		input string
 		want  string
 	}{
-		{input: "fedora", want: "fedora:7420"},
-		{input: "10.8.0.2", want: "10.8.0.2:7420"},
+		{input: "fedora", want: "fedora:42000"},
+		{input: "10.8.0.2", want: "10.8.0.2:42000"},
 		{input: "10.8.0.2:8123", want: "10.8.0.2:8123"},
-		{input: "fd00::2", want: "[fd00::2]:7420"},
-		{input: "[fd00::2]", want: "[fd00::2]:7420"},
+		{input: "fd00::2", want: "[fd00::2]:42000"},
+		{input: "[fd00::2]", want: "[fd00::2]:42000"},
 	}
 	for _, test := range tests {
 		t.Run(test.input, func(t *testing.T) {
@@ -55,7 +55,7 @@ func TestNormalizeRemoteTCPAddressDefaultsPortAndKeepsOverrides(t *testing.T) {
 }
 
 func TestNormalizeRemoteTCPAddressRejectsWildcardBind(t *testing.T) {
-	for _, address := range []string{"0.0.0.0", "[::]", ":7420"} {
+	for _, address := range []string{"0.0.0.0", "[::]", ":42000"} {
 		if _, err := normalizeRemoteTCPAddress(address); err == nil {
 			t.Errorf("normalizeRemoteTCPAddress(%q) succeeded; want an error", address)
 		}
@@ -67,10 +67,10 @@ func TestNormalizeRemoteListenAddressDefaultsToAllInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := ":7420"; got != want {
+	if want := ":42000"; got != want {
 		t.Fatalf("normalizeRemoteListenAddress(\"\") = %q, want %q", got, want)
 	}
-	for _, address := range []string{":7420", "0.0.0.0:7420", "[::]:7420"} {
+	for _, address := range []string{":42000", "0.0.0.0:42000", "[::]:42000"} {
 		if _, err := normalizeRemoteListenAddress(address); err != nil {
 			t.Errorf("normalizeRemoteListenAddress(%q): %v", address, err)
 		}
@@ -78,7 +78,7 @@ func TestNormalizeRemoteListenAddressDefaultsToAllInterfaces(t *testing.T) {
 	if port, all := remoteListenPort("0.0.0.0:8123"); port != "8123" || !all {
 		t.Fatalf("remoteListenPort(0.0.0.0:8123) = (%q, %v), want (8123, true)", port, all)
 	}
-	if _, all := remoteListenPort("10.0.0.2:7420"); all {
+	if _, all := remoteListenPort("10.0.0.2:42000"); all {
 		t.Fatal("specific VPN address was reported as all interfaces")
 	}
 }
@@ -89,9 +89,9 @@ func TestParseRemoteTCPTargetUsesSSHHostAndDialHost(t *testing.T) {
 		sshHost string
 		address string
 	}{
-		{target: "fedora", sshHost: "fedora", address: "fedora:7420"},
+		{target: "fedora", sshHost: "fedora", address: "fedora:42000"},
 		{target: "sacca@fedora:8123", sshHost: "sacca@fedora", address: "fedora:8123"},
-		{target: "10.8.0.2", sshHost: "10.8.0.2", address: "10.8.0.2:7420"},
+		{target: "10.8.0.2", sshHost: "10.8.0.2", address: "10.8.0.2:42000"},
 	}
 	for _, test := range tests {
 		sshHost, address, err := parseRemoteTCPTarget(test.target)
@@ -137,8 +137,8 @@ func TestRemoteListenerConfigStoresPrivateSigningKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if address != ":7420" {
-		t.Fatalf("saved listener address = %q, want :7420", address)
+	if address != ":42000" {
+		t.Fatalf("saved listener address = %q, want :42000", address)
 	}
 	configured, err := loadRemoteListenConfig()
 	if err != nil || configured != address {
@@ -400,5 +400,61 @@ func TestSSHRemoteProtocolCanCreateSession(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("SSH remote create did not reach the session backend")
+	}
+}
+
+func TestRemoteAddressRejectsBadPorts(t *testing.T) {
+	for _, in := range []string{"host:abc", "host:0", "host:99999", "host:-1"} {
+		if got, err := normalizeRemoteTCPAddress(in); err == nil {
+			t.Errorf("normalizeRemoteTCPAddress(%q) = %q, want an error", in, got)
+		}
+	}
+	if got, err := normalizeRemoteListenAddress(":65535"); err != nil || got != ":65535" {
+		t.Errorf("listen :65535 = %q, %v", got, err)
+	}
+}
+
+func TestValidateSSHHost(t *testing.T) {
+	for _, bad := range []string{"", " ", "-oProxyCommand=x", "a b", "a\nb"} {
+		if validateSSHHost(bad) == nil {
+			t.Errorf("validateSSHHost(%q) accepted", bad)
+		}
+	}
+	if err := validateSSHHost("user@host"); err != nil {
+		t.Error(err)
+	}
+	if args := sshArgs(false, "host", "cmd"); args[len(args)-3] != "--" {
+		t.Errorf("host is not separated from ssh options: %v", args)
+	}
+}
+
+func TestEnsureRemoteTicketKeyIsSafeToRaceAndLeavesNoTemporaryFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	keys := make(chan []byte, 8)
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			k, err := ensureRemoteTicketKey()
+			keys <- k
+			errs <- err
+		}()
+	}
+	var first []byte
+	for i := 0; i < 8; i++ {
+		k, err := <-keys, <-errs
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == nil {
+			first = k
+		} else if string(first) != string(k) {
+			t.Fatal("concurrent callers got different keys")
+		}
+	}
+	entries, _ := os.ReadDir(remoteConfigDir())
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".ticket-key-") {
+			t.Fatalf("temporary key file left behind: %s", e.Name())
+		}
 	}
 }

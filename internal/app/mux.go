@@ -35,8 +35,9 @@ const (
 	muxFrameAck   byte = 5 // to the host: the interface has consumed this many more bytes (4, big endian)
 
 	muxHeaderSize  = 9
-	muxMaxData     = 32 << 10 // data frames are split to this size
-	muxStreamQueue = 512      // frames buffered per channel before the connection waits
+	muxMaxData     = 32 << 10        // data frames are split to this size
+	muxInputStall  = 5 * time.Second // how long a full input queue may hold up the connection
+	muxStreamQueue = 512             // frames buffered per channel before the connection waits
 	// Flow control. The host sends at most muxWindow bytes of a session's output
 	// that the interface has not yet consumed, and the interface says how much it
 	// has consumed every muxAckEvery bytes. Without it, output piles up in the
@@ -261,10 +262,16 @@ func serveMux(w io.Writer, r io.Reader, dial func(string, time.Duration) (net.Co
 			st := s.streams[channel]
 			s.mu.Unlock()
 			if st != nil {
+				// A session that is not taking input must not stop the whole
+				// connection from being read: give it a while, then end it.
+				timer := time.NewTimer(muxInputStall)
 				select {
 				case st.in <- payload:
 				case <-st.done:
+				case <-timer.C:
+					st.close()
 				}
+				timer.Stop()
 			}
 		case muxFrameClose:
 			s.mu.Lock()
@@ -381,6 +388,9 @@ func (st *muxServerStream) run(open muxOpen) {
 func (st *muxServerStream) close() {
 	st.once.Do(func() {
 		close(st.done)
+		// Taking the lock makes a waiter that has checked done reach Wait first.
+		st.flowMu.Lock()
+		st.flowMu.Unlock()
 		st.flowCond.Broadcast()
 		st.connMu.Lock()
 		if st.conn != nil {

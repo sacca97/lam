@@ -104,21 +104,25 @@ func ensureRemoteTicketKey() ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate remote ticket signing key: %w", err)
 	}
-	file, err := os.OpenFile(remoteTicketKeyPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if os.IsExist(err) {
-		return loadRemoteTicketKey()
-	}
+	// Written whole under another name and linked into place, so a reader never
+	// sees a half-made key and a crash leaves nothing behind.
+	tmp, err := os.CreateTemp(remoteConfigDir(), ".ticket-key-*")
 	if err != nil {
 		return nil, fmt.Errorf("create remote ticket signing key: %w", err)
 	}
-	if _, err := file.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
-		file.Close()
-		os.Remove(remoteTicketKeyPath())
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
+		tmp.Close()
 		return nil, fmt.Errorf("write remote ticket signing key: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		os.Remove(remoteTicketKeyPath())
+	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("close remote ticket signing key: %w", err)
+	}
+	if err := os.Link(tmp.Name(), remoteTicketKeyPath()); err != nil {
+		if os.IsExist(err) {
+			return loadRemoteTicketKey()
+		}
+		return nil, fmt.Errorf("install remote ticket signing key: %w", err)
 	}
 	return key, nil
 }

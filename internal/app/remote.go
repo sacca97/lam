@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,7 @@ import (
 
 const (
 	remoteProtocolVersion = 3
-	defaultRemoteTCPPort  = "7420"
+	defaultRemoteTCPPort  = "42000"
 	remoteTicketTTL       = 30 * time.Second
 	remoteTicketDomain    = "LAM-REMOTE-TCP-1"
 )
@@ -93,6 +94,9 @@ func isRemoteTCPHostIP(host string) bool {
 }
 
 func joinRemoteTCPHostPort(host, port string, allowUnspecified bool) (string, error) {
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("invalid port %q: use a number from 1 to 65535", port)
+	}
 	ipHost := host
 	if zone := strings.LastIndexByte(ipHost, '%'); zone >= 0 {
 		ipHost = ipHost[:zone]
@@ -174,9 +178,17 @@ type pipeRWC struct {
 // startRemoteRPC runs `lam remote` on the host over ssh and talks to it. The
 // ssh process is the only ssh connection: requests and every attached session
 // share it.
+// validateSSHHost rejects what ssh would read as an option or several words.
+func validateSSHHost(host string) error {
+	if strings.TrimSpace(host) == "" || strings.HasPrefix(host, "-") || strings.ContainsAny(host, " \t\r\n") {
+		return fmt.Errorf("invalid SSH host %q", host)
+	}
+	return nil
+}
+
 func startRemoteRPC(host string, unattended bool) (*muxClient, error) {
-	if strings.TrimSpace(host) == "" || strings.HasPrefix(host, "-") {
-		return nil, fmt.Errorf("invalid SSH host %q", host)
+	if err := validateSSHHost(host); err != nil {
+		return nil, err
 	}
 	cmd, tail, err := newSSHCommand(unattended, host, remoteToolCommand("remote"))
 	if err != nil {
@@ -224,7 +236,7 @@ func sshArgs(unattended bool, host, command string) []string {
 	if unattended {
 		args = append(args, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 	}
-	return append(args, host, command)
+	return append(args, "--", host, command)
 }
 
 // newSSHCommand prepares ssh to run command on host. An attended command shows
@@ -505,8 +517,8 @@ func remoteToolCommand(args ...string) string {
 }
 
 func issueRemoteTCPAuthTicketOverSSH(sshHost string, unattended bool) (string, error) {
-	if strings.TrimSpace(sshHost) == "" || strings.HasPrefix(sshHost, "-") || strings.ContainsAny(sshHost, " \t\r\n") {
-		return "", fmt.Errorf("invalid SSH host %q", sshHost)
+	if err := validateSSHHost(sshHost); err != nil {
+		return "", err
 	}
 	cmd, tail, err := newSSHCommand(unattended, sshHost, remoteToolCommand("remote-ticket"))
 	if err != nil {
@@ -652,16 +664,16 @@ func (b *remoteSessionBackend) supervise(dial func() (*muxClient, error)) {
 					}
 				}
 				next, err := dial()
-				select {
-				case <-stopping:
-					if next != nil {
-						next.close()
-					}
-					return
-				default:
-				}
 				if err == nil {
+					// Close must not slip in between the check and the swap.
 					b.linkMu.Lock()
+					select {
+					case <-stopping:
+						b.linkMu.Unlock()
+						next.close()
+						return
+					default:
+					}
 					b.client = next
 					b.gen++
 					b.attempt, b.lastErr = 0, ""
@@ -674,6 +686,11 @@ func (b *remoteSessionBackend) supervise(dial func() (*muxClient, error)) {
 					}
 					b.dirMu.Unlock()
 					break
+				}
+				select {
+				case <-stopping:
+					return
+				default:
 				}
 				lost = err.Error()
 			}
@@ -691,15 +708,24 @@ type cachedRemoteDir struct {
 // disconnected host does not stall every frame on repeated timeouts.
 const remoteDirErrorTTL = 10 * time.Second
 
+// remoteDirTimeout bounds one directory lookup, so a dead link shows an error
+// quickly instead of waiting for the heartbeat to give up.
+const remoteDirTimeout = 5 * time.Second
+
 // cachedDirectory returns the answer to a directory request, asking the
 // remote host only the first time (or again after a failed lookup expires).
 func (b *remoteSessionBackend) cachedDirectory(op string) (string, error) {
 	b.dirMu.Lock()
-	defer b.dirMu.Unlock()
 	if c, ok := b.dirs[op]; ok && (c.err == nil || time.Since(c.at) < remoteDirErrorTTL) {
+		b.dirMu.Unlock()
 		return c.value, c.err
 	}
-	response, err := b.cur().call(remoteRequest{Op: op})
+	b.dirMu.Unlock()
+	// The lock is not held across the request: a stalled link must not block
+	// every other lookup behind it.
+	response, err := b.callWithTimeout(remoteRequest{Op: op}, remoteDirTimeout)
+	b.dirMu.Lock()
+	defer b.dirMu.Unlock()
 	if b.dirs == nil {
 		b.dirs = make(map[string]cachedRemoteDir)
 	}
@@ -842,7 +868,11 @@ func serveRemoteTCPWithStop(address string, stop <-chan struct{}) error {
 				default:
 				}
 			}
-			return err
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
+			time.Sleep(50 * time.Millisecond) // a transient failure such as EMFILE
+			continue
 		}
 		go func(conn net.Conn) {
 			defer conn.Close()
