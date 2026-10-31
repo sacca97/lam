@@ -2,136 +2,33 @@ package app
 
 import (
 	"bufio"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const (
-	remoteProtocolVersion = 3
-	defaultRemoteTCPPort  = "42000"
-	remoteTicketTTL       = 30 * time.Second
-	remoteTicketDomain    = "LAM-REMOTE-TCP-1"
-)
+const remoteProtocolVersion = 3
 
-func normalizeRemoteTCPAddress(address string) (string, error) {
-	return normalizeRemoteAddress(address, false)
-}
-
-func normalizeRemoteListenAddress(address string) (string, error) {
-	if strings.TrimSpace(address) == "" {
-		address = ":" + defaultRemoteTCPPort
-	}
-	return normalizeRemoteAddress(address, true)
-}
-
-func remoteListenPort(address string) (string, bool) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return "", false
-	}
-	if host == "" {
-		return port, true
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		return port, true
-	}
-	return port, false
-}
-
-func normalizeRemoteAddress(address string, allowUnspecified bool) (string, error) {
-	address = strings.TrimSpace(address)
-	if address == "" {
-		return "", fmt.Errorf("remote TCP address is required")
-	}
-	host, port, err := net.SplitHostPort(address)
-	if err == nil {
-		if host == "" {
-			if !allowUnspecified {
-				return "", fmt.Errorf("remote TCP address must name a host or VPN address")
-			}
+// readRemoteLine reads one newline-terminated line of at most limit bytes.
+func readRemoteLine(reader *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > limit {
+			return nil, fmt.Errorf("remote request exceeds %d bytes", limit)
 		}
-		if port == "" {
-			port = defaultRemoteTCPPort
+		line = append(line, fragment...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
 		}
-		return joinRemoteTCPHostPort(host, port, allowUnspecified)
+		return line, err
 	}
-
-	if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
-		host = address[1 : len(address)-1]
-		if !isRemoteTCPHostIP(host) {
-			return "", fmt.Errorf("invalid remote TCP address %q", address)
-		}
-		return joinRemoteTCPHostPort(host, defaultRemoteTCPPort, allowUnspecified)
-	}
-	if isRemoteTCPHostIP(address) {
-		return joinRemoteTCPHostPort(address, defaultRemoteTCPPort, allowUnspecified)
-	}
-	if strings.Contains(address, ":") {
-		return "", fmt.Errorf("invalid remote TCP address %q; use host or host:port", address)
-	}
-	return joinRemoteTCPHostPort(address, defaultRemoteTCPPort, allowUnspecified)
-}
-
-func isRemoteTCPHostIP(host string) bool {
-	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
-		host = host[:zone]
-	}
-	return net.ParseIP(host) != nil
-}
-
-func joinRemoteTCPHostPort(host, port string, allowUnspecified bool) (string, error) {
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return "", fmt.Errorf("invalid port %q: use a number from 1 to 65535", port)
-	}
-	ipHost := host
-	if zone := strings.LastIndexByte(ipHost, '%'); zone >= 0 {
-		ipHost = ipHost[:zone]
-	}
-	if ip := net.ParseIP(ipHost); ip != nil && ip.IsUnspecified() && !allowUnspecified {
-		return "", fmt.Errorf("remote TCP address must name a reachable host or VPN interface, not %q", host)
-	}
-	return net.JoinHostPort(host, port), nil
-}
-
-func parseRemoteTCPTarget(target string) (sshHost, address string, err error) {
-	address, err = normalizeRemoteTCPAddress(target)
-	if err != nil {
-		return "", "", err
-	}
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid remote TCP address %q", target)
-	}
-	sshHost = host
-	tcpHost := host
-	if at := strings.LastIndexByte(host, '@'); at >= 0 {
-		if strings.Count(host, "@") != 1 {
-			return "", "", fmt.Errorf("invalid SSH target %q", host)
-		}
-		user := host[:at]
-		tcpHost = host[at+1:]
-		if user == "" || tcpHost == "" {
-			return "", "", fmt.Errorf("invalid SSH target %q", host)
-		}
-	}
-	if strings.HasPrefix(sshHost, "-") || strings.ContainsAny(sshHost, " \t\r\n") || strings.HasPrefix(tcpHost, "-") {
-		return "", "", fmt.Errorf("invalid SSH target %q", sshHost)
-	}
-	return sshHost, net.JoinHostPort(tcpHost, port), nil
 }
 
 type remoteRequest struct {
@@ -282,29 +179,6 @@ func (t *stderrTail) suffix() string {
 	return ""
 }
 
-// startTCPRemoteRPC connects to the host's TCP listener and talks to it. The
-// ticket authenticates this one connection, which then carries everything.
-func startTCPRemoteRPC(address, ticket string) (*muxClient, error) {
-	address, err := normalizeRemoteTCPAddress(address)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(ticket) == "" {
-		return nil, fmt.Errorf("remote authentication ticket is empty")
-	}
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("connect to remote %s: %w", address, err)
-	}
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if err := writeAll(conn, []byte(ticket+"\n")); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("send remote authentication ticket: %w", err)
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return muxHandshake(conn, bufio.NewReader(conn), nil)
-}
-
 // muxHandshake agrees on the protocol with the host and switches the
 // connection to frames. A host running an older lam is refused with a message
 // saying so; there is no slower fallback.
@@ -327,7 +201,7 @@ func muxHandshake(rw io.ReadWriteCloser, reader *bufio.Reader, cleanup func()) (
 			if err := writeAll(rw, append(data, '\n')); err != nil {
 				return remoteResponse{}, err
 			}
-			line, err := readRemoteTCPLine(reader, maxFramePayload)
+			line, err := readRemoteLine(reader, maxFramePayload)
 			if err != nil {
 				return remoteResponse{}, fmt.Errorf("the remote lam closed the connection: %w", err)
 			}
@@ -375,7 +249,7 @@ func muxHandshake(rw io.ReadWriteCloser, reader *bufio.Reader, cleanup func()) (
 // before that.
 func serveRemoteHandshake(reader *bufio.Reader, w io.Writer, closer io.Closer) error {
 	for {
-		line, err := readRemoteTCPLine(reader, 4096)
+		line, err := readRemoteLine(reader, 4096)
 		if err != nil {
 			if err == io.EOF {
 				return nil
@@ -451,15 +325,6 @@ func (d *stdioDrop) Close() error {
 	return nil
 }
 
-// serveRemoteTCPConn authenticates one TCP client with its ticket, then serves it.
-func serveRemoteTCPConn(conn net.Conn, key []byte, replays *remoteTicketReplayCache) error {
-	reader := bufio.NewReader(conn)
-	if err := authenticateRemoteTCPClient(reader, conn, key, replays); err != nil {
-		return err
-	}
-	return serveRemoteHandshake(reader, conn, conn)
-}
-
 // streamAttacher is implemented by backends that attach sessions over their
 // connection instead of running a process.
 type streamAttacher interface {
@@ -480,29 +345,6 @@ func newSSHSessionBackend(host string) (*sshSessionBackend, error) {
 	return b, nil
 }
 
-func newTCPSessionBackendWithTicket(address, sshHost, ticket string) (*tcpSessionBackend, error) {
-	address, err := normalizeRemoteTCPAddress(address)
-	if err != nil {
-		return nil, err
-	}
-	client, err := startTCPRemoteRPC(address, ticket)
-	if err != nil {
-		return nil, err
-	}
-	b := &tcpSessionBackend{address: address, sshHost: sshHost, remoteSessionBackend: remoteSessionBackend{name: "tcp:" + address, client: client}}
-	if sshHost != "" {
-		// A ticket works once, so a new connection needs a new one from the host.
-		b.supervise(func() (*muxClient, error) {
-			ticket, err := issueRemoteTCPAuthTicketOverSSH(sshHost, true)
-			if err != nil {
-				return nil, err
-			}
-			return startTCPRemoteRPC(address, ticket)
-		})
-	}
-	return b, nil
-}
-
 func remoteToolCommand(args ...string) string {
 	quotedArgs := make([]string, len(args))
 	for i, arg := range args {
@@ -514,46 +356,6 @@ func remoteToolCommand(args ...string) string {
 		"; elif command -v lam >/dev/null 2>&1; then " +
 		"exec lam " + command +
 		"; else printf '%s\\n' 'LAM is not installed on this SSH host. Install it there with make install or add its binary to PATH.' >&2; exit 127; fi"
-}
-
-func issueRemoteTCPAuthTicketOverSSH(sshHost string, unattended bool) (string, error) {
-	if err := validateSSHHost(sshHost); err != nil {
-		return "", err
-	}
-	cmd, tail, err := newSSHCommand(unattended, sshHost, remoteToolCommand("remote-ticket"))
-	if err != nil {
-		return "", err
-	}
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("request remote access ticket over SSH to %s: %w%s", sshHost, err, tail.suffix())
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		candidate := strings.TrimSpace(line)
-		parts := strings.Split(candidate, ".")
-		if len(parts) != 2 {
-			continue
-		}
-		payload, payloadErr := base64.RawURLEncoding.DecodeString(parts[0])
-		signature, signatureErr := base64.RawURLEncoding.DecodeString(parts[1])
-		if payloadErr == nil && signatureErr == nil && len(payload) > 0 && len(signature) == sha256.Size {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("SSH host %s did not return a valid remote access ticket", sshHost)
-}
-
-func printRemoteTCPAuthTicket() error {
-	key, err := ensureRemoteTicketKey()
-	if err != nil {
-		return fmt.Errorf("load remote ticket signing key: %w", err)
-	}
-	ticket, err := issueRemoteTCPAuthTicket(key)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintln(os.Stdout, ticket)
-	return err
 }
 
 type sshSessionBackend struct {
@@ -733,24 +535,6 @@ func (b *remoteSessionBackend) cachedDirectory(op string) (string, error) {
 	return response.Directory, err
 }
 
-type tcpSessionBackend struct {
-	address string
-	sshHost string
-	remoteSessionBackend
-}
-
-func newTCPSessionBackend(target string) (*tcpSessionBackend, error) {
-	sshHost, address, err := parseRemoteTCPTarget(target)
-	if err != nil {
-		return nil, err
-	}
-	ticket, err := issueRemoteTCPAuthTicketOverSSH(sshHost, false)
-	if err != nil {
-		return nil, err
-	}
-	return newTCPSessionBackendWithTicket(address, sshHost, ticket)
-}
-
 // errUpdatedLocal means this machine was updated and must be started again.
 var errUpdatedLocal = errors.New("lam was updated")
 
@@ -774,8 +558,8 @@ func runSSH(host string, promptMe bool) error {
 }
 
 // connectOfferingUpdate connects, and when the two ends run different builds
-// says which is older and offers to update, as `lam ssh` and `lam remote` both
-// do. host is the ssh host used to reach the remote machine.
+// says which is older and offers to update, as `lam ssh` does. host is the ssh
+// host used to reach the remote machine.
 func connectOfferingUpdate[B interface{ Close() }](host string, connect func() (B, error), remote func(B) *remoteSessionBackend) (B, error) {
 	backend, err := connect()
 	if err != nil {
@@ -806,199 +590,6 @@ func connectOfferingUpdate[B interface{ Close() }](host string, connect func() (
 		}
 	}
 	return backend, nil
-}
-
-func runTCPRemote(address string, promptMe bool) error {
-	sshHost, _, err := parseRemoteTCPTarget(address)
-	if err != nil {
-		return err
-	}
-	backend, err := connectOfferingUpdate(sshHost, func() (*tcpSessionBackend, error) { return newTCPSessionBackend(address) },
-		func(b *tcpSessionBackend) *remoteSessionBackend { return &b.remoteSessionBackend })
-	if errors.Is(err, errUpdatedLocal) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer backend.Close()
-	setBackend(backend)
-	launchDir, err := backend.WorkingDirectory()
-	if err != nil {
-		return fmt.Errorf("read remote working directory: %w", err)
-	}
-	runIDE(promptMe, launchDir)
-	return nil
-}
-
-func serveRemoteTCPWithStop(address string, stop <-chan struct{}) error {
-	address, err := normalizeRemoteListenAddress(address)
-	if err != nil {
-		return err
-	}
-	key, err := loadRemoteTicketKey()
-	if err != nil {
-		return fmt.Errorf("load remote ticket signing key: %w", err)
-	}
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", address, err)
-	}
-	defer listener.Close()
-	listenerClosed := make(chan struct{})
-	defer close(listenerClosed)
-	if stop != nil {
-		go func() {
-			select {
-			case <-stop:
-				_ = listener.Close()
-			case <-listenerClosed:
-			}
-		}()
-	}
-	fmt.Fprintf(os.Stderr, "LAM remote listening on %s (unencrypted TCP)\n", listener.Addr())
-	replays := newRemoteTicketReplayCache()
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if stop != nil {
-				select {
-				case <-stop:
-					return nil
-				default:
-				}
-			}
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			time.Sleep(50 * time.Millisecond) // a transient failure such as EMFILE
-			continue
-		}
-		go func(conn net.Conn) {
-			defer conn.Close()
-			_ = serveRemoteTCPConn(conn, key, replays)
-		}(conn)
-	}
-}
-
-type remoteTicketClaims struct {
-	ExpiresAt int64  `json:"exp"`
-	Nonce     string `json:"nonce"`
-}
-
-func issueRemoteTCPAuthTicket(key []byte) (string, error) {
-	if len(key) != remoteTicketKeyBytes {
-		return "", fmt.Errorf("invalid remote ticket signing key")
-	}
-	nonce := make([]byte, 24)
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("generate remote ticket nonce: %w", err)
-	}
-	claims := remoteTicketClaims{ExpiresAt: time.Now().Add(remoteTicketTTL).Unix(), Nonce: base64.RawURLEncoding.EncodeToString(nonce)}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", fmt.Errorf("encode remote ticket: %w", err)
-	}
-	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(remoteTicketDomain))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write(payload)
-	return encodedPayload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
-}
-
-func validateRemoteTCPAuthTicket(ticket string, key []byte, now time.Time) (string, time.Time, error) {
-	parts := strings.Split(ticket, ".")
-	if len(parts) != 2 {
-		return "", time.Time{}, fmt.Errorf("malformed remote authentication ticket")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("malformed remote authentication ticket")
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil || len(signature) != sha256.Size {
-		return "", time.Time{}, fmt.Errorf("malformed remote authentication ticket")
-	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(remoteTicketDomain))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write(payload)
-	if subtle.ConstantTimeCompare(signature, mac.Sum(nil)) != 1 {
-		return "", time.Time{}, fmt.Errorf("invalid remote authentication ticket")
-	}
-	var claims remoteTicketClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", time.Time{}, fmt.Errorf("malformed remote authentication ticket")
-	}
-	nonce, err := base64.RawURLEncoding.DecodeString(claims.Nonce)
-	if err != nil || len(nonce) != 24 {
-		return "", time.Time{}, fmt.Errorf("malformed remote authentication ticket")
-	}
-	expires := time.Unix(claims.ExpiresAt, 0)
-	if !expires.After(now) || expires.After(now.Add(time.Minute)) {
-		return "", time.Time{}, fmt.Errorf("remote authentication ticket is expired or has an invalid lifetime")
-	}
-	return claims.Nonce, expires, nil
-}
-
-type remoteTicketReplayCache struct {
-	mu   sync.Mutex
-	used map[string]time.Time
-}
-
-func newRemoteTicketReplayCache() *remoteTicketReplayCache {
-	return &remoteTicketReplayCache{used: make(map[string]time.Time)}
-}
-
-func (c *remoteTicketReplayCache) consume(nonce string, expires time.Time, now time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for usedNonce, usedUntil := range c.used {
-		if !usedUntil.After(now) {
-			delete(c.used, usedNonce)
-		}
-	}
-	if _, exists := c.used[nonce]; exists {
-		return false
-	}
-	c.used[nonce] = expires
-	return true
-}
-
-func authenticateRemoteTCPClient(reader *bufio.Reader, conn net.Conn, key []byte, replays *remoteTicketReplayCache) error {
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	line, err := readRemoteTCPLine(reader, 4096)
-	_ = conn.SetReadDeadline(time.Time{})
-	if err != nil {
-		return fmt.Errorf("read authentication ticket: %w", err)
-	}
-	if len(line) == 0 || line[len(line)-1] != '\n' {
-		return fmt.Errorf("malformed remote authentication ticket")
-	}
-	nonce, expires, err := validateRemoteTCPAuthTicket(strings.TrimSpace(string(line)), key, time.Now())
-	if err != nil {
-		return err
-	}
-	if !replays.consume(nonce, expires, time.Now()) {
-		return fmt.Errorf("remote authentication ticket has already been used")
-	}
-	return nil
-}
-
-func readRemoteTCPLine(reader *bufio.Reader, limit int) ([]byte, error) {
-	var line []byte
-	for {
-		fragment, err := reader.ReadSlice('\n')
-		if len(line)+len(fragment) > limit {
-			return nil, fmt.Errorf("remote request exceeds %d bytes", limit)
-		}
-		line = append(line, fragment...)
-		if errors.Is(err, bufio.ErrBufferFull) {
-			continue
-		}
-		return line, err
-	}
 }
 
 func (b *remoteSessionBackend) Name() string { return b.name }

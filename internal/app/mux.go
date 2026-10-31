@@ -1,7 +1,7 @@
 package app
 
-// A remote connection is one authenticated byte stream (a TCP connection, or
-// the stdio of an ssh command) shared by everything the interface needs from
+// A remote connection is one authenticated byte stream (the stdio of an ssh
+// command) shared by everything the interface needs from
 // the remote host: requests, and any number of attached sessions. Sharing it
 // means the network connection and the authentication happen once, and
 // switching to another session costs one round trip instead of a new

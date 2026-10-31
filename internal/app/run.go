@@ -95,56 +95,13 @@ func Run() {
 			}
 			return
 		case "remote":
-			var err error
-			listenConfigured := false
-			listenerDisabled := false
-			listenerAddress := ""
-			switch {
-			case len(os.Args) == 2 || len(os.Args) == 3 && os.Args[2] == "--stdio":
-				err = serveRemote(os.Stdin, os.Stdout)
-			case len(os.Args) == 3 && os.Args[2] == "--listen":
-				listenerAddress, _, err = enableRemoteListener("")
-				listenConfigured = err == nil
-			case len(os.Args) == 4 && os.Args[2] == "--listen":
-				listenerAddress, _, err = enableRemoteListener(os.Args[3])
-				listenConfigured = err == nil
-			case len(os.Args) == 3 && os.Args[2] == "--disable":
-				_, _, err = disableRemoteListener()
-				listenerDisabled = err == nil
-			case len(os.Args) == 3:
-				if err := checkInteractiveTerminal(); err != nil {
-					fmt.Fprintf(os.Stderr, "lam remote: %v\n", err)
-					os.Exit(1)
-				}
-				err = runTCPRemote(os.Args[2], false)
-			default:
-				fmt.Fprintf(os.Stderr, "usage: lam remote <ssh-host[:port]> | lam remote --listen [bind-address[:port]] | lam remote --disable (default port %s)\n", defaultRemoteTCPPort)
+			// The other end of `lam ssh`: speaks the protocol on stdin and stdout.
+			if len(os.Args) != 2 && !(len(os.Args) == 3 && os.Args[2] == "--stdio") {
+				fmt.Fprintln(os.Stderr, "usage: lam remote [--stdio] (run by `lam ssh` on the remote host)")
 				os.Exit(2)
 			}
-			if err != nil {
+			if err := serveRemote(os.Stdin, os.Stdout); err != nil {
 				fmt.Fprintf(os.Stderr, "remote: %v\n", err)
-				os.Exit(1)
-			}
-			if listenConfigured {
-				fmt.Fprintf(os.Stdout, "Remote TCP listener configured on %s.\n", listenerAddress)
-				if port, allInterfaces := remoteListenPort(listenerAddress); allInterfaces {
-					fmt.Fprintf(os.Stdout, "It accepts connections on all interfaces; restrict port %s to your VPN in the firewall.\n", port)
-				}
-				if !daemonServiceInstalled() {
-					fmt.Fprintln(os.Stdout, "Install the background daemon with `lam install-service` to keep the listener active.")
-				}
-			}
-			if listenerDisabled {
-				fmt.Fprintln(os.Stdout, "Remote TCP listener disabled.")
-			}
-			return
-		case "remote-ticket":
-			if len(os.Args) != 2 {
-				fmt.Fprintln(os.Stderr, "usage: lam remote-ticket")
-				os.Exit(2)
-			}
-			if err := printRemoteTCPAuthTicket(); err != nil {
-				fmt.Fprintf(os.Stderr, "remote ticket: %v\n", err)
 				os.Exit(1)
 			}
 			return
@@ -201,9 +158,6 @@ func printHelp() {
 	fmt.Println("  send <session> <text>  Type text into a session and press Enter")
 	fmt.Println("  restore [--list]    Reopen sessions that ended with a reboot or crash, resuming their agents")
 	fmt.Println("  ssh <host>          Open this UI for sessions on an SSH host")
-	fmt.Printf("  remote <host[:port]>  Open this UI over VPN TCP after SSH authentication (default port %s)\n", defaultRemoteTCPPort)
-	fmt.Printf("  remote --listen [IP[:port]]  Enable the daemon listener (all interfaces by default, port %s)\n", defaultRemoteTCPPort)
-	fmt.Println("  remote --disable    Disable the daemon's TCP listener")
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  --prompt-me         Ask for a starting prompt when creating sessions")

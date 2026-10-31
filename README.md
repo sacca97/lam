@@ -73,26 +73,11 @@ and sessions run on the remote host; install `lam` there with `make install` or 
 SSH mode prefers `~/.local/bin/lam`, then checks `PATH`. Remote mode currently
 supports sessions, attach, rename, stop, and restore.
 
-For direct TCP over a VPN, enable the listener on the remote device and connect from the local
-device:
-
-```sh
-# Remote device
-lam remote --listen
-
-# Local device
-lam remote fedora
-```
-
-`lam remote --listen` configures the daemon to listen on all interfaces at port `42000`; use
-`lam remote --disable` to turn it off. Install the daemon with `lam install-service` if it is not
-already running. The client authenticates to the remote host over SSH once, requests a
-short-lived, single-use TCP ticket, and opens one TCP connection. Requests and every attached
-session share that connection (compressed, with flow control), so switching sessions costs a single
-round trip and no further logins. No key is copied between devices. The TCP stream is unencrypted,
-so firewall port `42000` to your VPN network. `lam ssh` uses the same protocol over a single SSH
-connection. Both ends must run the same version of `lam`; an older remote host is refused with a
-message asking you to update it.
+Over `lam ssh`, requests and every attached session share one SSH connection (compressed, with
+flow control), so switching sessions costs a single round trip and no further logins, and
+everything is encrypted by SSH. The connection is watched and re-established when it drops. Both
+ends must run the same version of `lam`; when they differ, `lam ssh` says which is older and offers
+to update it.
 
 ## Keyboard controls
 
@@ -104,7 +89,7 @@ In the Sessions view:
 - The new-session choices include `Terminal`, which opens a shell instead of an agent.
 - `t` (or `Alt+T` from any focus) toggles a terminal for the selected session. It starts in that session's working directory and is placed to the right of the session pane (40% of its width) by default. Click either pane or use `Ctrl+Space` to switch focus. Press `s` for settings: the terminal can sit on the right or below the session pane, at 30%, 40% or 50% of the width or height. The choice is saved. On narrow windows the terminal falls back to below.
 - `Ctrl+Space` or `Ctrl+\` switches focus between the sidebar and main pane. When the integrated terminal is open, the shortcuts cycle through the sidebar, session, and terminal. Clicking a pane also focuses it.
-- Sessions survive closing LAM. If their hosts were ended by a reboot, crash or logout, LAM offers to restore them on the next start (`y` restore, `n` discard), reopening each agent in its directory and resuming its last conversation (`claude --continue`, `codex resume --last`, `pi`/`opencode --continue`). This also works over `lam ssh` and `lam remote`: the remote host keeps the list and restores on its own side. `lam restore` does the same locally from the command line and `lam restore --list` shows what it would do. Sessions you stop yourself or whose command exits are not offered.
+- Sessions survive closing LAM. If their hosts were ended by a reboot, crash or logout, LAM offers to restore them on the next start (`y` restore, `n` discard), reopening each agent in its directory and resuming its last conversation (`claude --continue`, `codex resume --last`, `pi`/`opencode --continue`). This also works over `lam ssh`: the remote host keeps the list and restores on its own side. `lam restore` does the same locally from the command line and `lam restore --list` shows what it would do. Sessions you stop yourself or whose command exits are not offered.
 - `F2` collapses or expands the sidebar. Hold `Shift` while dragging across the integrated terminal to select and copy text.
 - `Ctrl+↑` / `Ctrl+↓` switch to the previous or next session from anywhere. `Ctrl+D` or `q` detaches: LAM closes and every session, including each session's terminal, keeps running. `Ctrl+Q` quits from anywhere and, after confirmation, stops all sessions. Both are intercepted before the focused program sees them.
 - Dragging the edge of the sidebar or of the terminal resizes it, and double-clicking the sidebar edge restores its default width; project headings in the sidebar fold with `←` or `Space`.

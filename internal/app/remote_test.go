@@ -3,7 +3,6 @@ package app
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -15,202 +14,20 @@ import (
 	"time"
 )
 
-type tcpRemoteTestBackend struct {
+type remoteTestBackend struct {
 	created chan sessionInfo
 }
 
-func (*tcpRemoteTestBackend) Name() string { return "tcp-test" }
-func (b *tcpRemoteTestBackend) Create(name, cwd, command string) error {
+func (*remoteTestBackend) Name() string { return "test" }
+func (b *remoteTestBackend) Create(name, cwd, command string) error {
 	b.created <- sessionInfo{Name: name, CWD: cwd, Command: command}
 	return nil
 }
-func (*tcpRemoteTestBackend) AttachCmd(string) *exec.Cmd     { return exec.Command("true") }
-func (*tcpRemoteTestBackend) List() ([]sessionInfo, error)   { return nil, nil }
-func (*tcpRemoteTestBackend) Kill(string) error              { return nil }
-func (*tcpRemoteTestBackend) History(string) (string, error) { return "", nil }
-func (*tcpRemoteTestBackend) Send(string, string) error      { return nil }
-
-func TestNormalizeRemoteTCPAddressDefaultsPortAndKeepsOverrides(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{input: "fedora", want: "fedora:42000"},
-		{input: "10.8.0.2", want: "10.8.0.2:42000"},
-		{input: "10.8.0.2:8123", want: "10.8.0.2:8123"},
-		{input: "fd00::2", want: "[fd00::2]:42000"},
-		{input: "[fd00::2]", want: "[fd00::2]:42000"},
-	}
-	for _, test := range tests {
-		t.Run(test.input, func(t *testing.T) {
-			got, err := normalizeRemoteTCPAddress(test.input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != test.want {
-				t.Fatalf("normalizeRemoteTCPAddress(%q) = %q, want %q", test.input, got, test.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeRemoteTCPAddressRejectsWildcardBind(t *testing.T) {
-	for _, address := range []string{"0.0.0.0", "[::]", ":42000"} {
-		if _, err := normalizeRemoteTCPAddress(address); err == nil {
-			t.Errorf("normalizeRemoteTCPAddress(%q) succeeded; want an error", address)
-		}
-	}
-}
-
-func TestNormalizeRemoteListenAddressDefaultsToAllInterfaces(t *testing.T) {
-	got, err := normalizeRemoteListenAddress("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := ":42000"; got != want {
-		t.Fatalf("normalizeRemoteListenAddress(\"\") = %q, want %q", got, want)
-	}
-	for _, address := range []string{":42000", "0.0.0.0:42000", "[::]:42000"} {
-		if _, err := normalizeRemoteListenAddress(address); err != nil {
-			t.Errorf("normalizeRemoteListenAddress(%q): %v", address, err)
-		}
-	}
-	if port, all := remoteListenPort("0.0.0.0:8123"); port != "8123" || !all {
-		t.Fatalf("remoteListenPort(0.0.0.0:8123) = (%q, %v), want (8123, true)", port, all)
-	}
-	if _, all := remoteListenPort("10.0.0.2:42000"); all {
-		t.Fatal("specific VPN address was reported as all interfaces")
-	}
-}
-
-func TestParseRemoteTCPTargetUsesSSHHostAndDialHost(t *testing.T) {
-	tests := []struct {
-		target  string
-		sshHost string
-		address string
-	}{
-		{target: "fedora", sshHost: "fedora", address: "fedora:42000"},
-		{target: "sacca@fedora:8123", sshHost: "sacca@fedora", address: "fedora:8123"},
-		{target: "10.8.0.2", sshHost: "10.8.0.2", address: "10.8.0.2:42000"},
-	}
-	for _, test := range tests {
-		sshHost, address, err := parseRemoteTCPTarget(test.target)
-		if err != nil {
-			t.Fatalf("parseRemoteTCPTarget(%q): %v", test.target, err)
-		}
-		if sshHost != test.sshHost || address != test.address {
-			t.Errorf("parseRemoteTCPTarget(%q) = (%q, %q), want (%q, %q)", test.target, sshHost, address, test.sshHost, test.address)
-		}
-	}
-}
-
-func TestRemoteTCPAuthTicketExpiresAndCanOnlyBeConsumedOnce(t *testing.T) {
-	key := bytes.Repeat([]byte{0x42}, remoteTicketKeyBytes)
-	now := time.Now().Truncate(time.Second)
-	ticket, err := issueRemoteTCPAuthTicket(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nonce, expires, err := validateRemoteTCPAuthTicket(ticket, key, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cache := newRemoteTicketReplayCache()
-	if !cache.consume(nonce, expires, now) {
-		t.Fatal("first ticket use was rejected")
-	}
-	if cache.consume(nonce, expires, now) {
-		t.Fatal("replayed ticket was accepted")
-	}
-	if _, _, err := validateRemoteTCPAuthTicket(ticket, key, expires.Add(time.Second)); err == nil {
-		t.Fatal("expired ticket was accepted")
-	}
-	if _, _, err := validateRemoteTCPAuthTicket(ticket+"x", key, now); err == nil {
-		t.Fatal("tampered ticket was accepted")
-	}
-}
-
-func TestRemoteListenerConfigStoresPrivateSigningKey(t *testing.T) {
-	configRoot := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configRoot)
-	address, err := saveRemoteListenConfig("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if address != ":42000" {
-		t.Fatalf("saved listener address = %q, want :42000", address)
-	}
-	configured, err := loadRemoteListenConfig()
-	if err != nil || configured != address {
-		t.Fatalf("loadRemoteListenConfig() = %q, %v; want %q", configured, err, address)
-	}
-
-	key, err := ensureRemoteTicketKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loadRemoteTicketKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(key, loaded) {
-		t.Fatal("loaded signing key does not match the generated key")
-	}
-	info, err := os.Stat(remoteTicketKeyPath())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("signing key mode = %04o, want 0600", info.Mode().Perm())
-	}
-}
-
-func TestServeRemoteTCPConnAuthenticatesTicketBeforeRPC(t *testing.T) {
-	key := bytes.Repeat([]byte{0x31}, remoteTicketKeyBytes)
-	ticket, err := issueRemoteTCPAuthTicket(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replays := newRemoteTicketReplayCache()
-	serveOnce := func(ticket string) (*remoteResponse, error) {
-		client, server := net.Pipe()
-		serverDone := make(chan error, 1)
-		go func() {
-			defer server.Close()
-			serverDone <- serveRemoteTCPConn(server, key, replays)
-		}()
-		_ = client.SetDeadline(time.Now().Add(time.Second))
-		if err := writeAll(client, []byte(ticket+"\n")); err != nil {
-			client.Close()
-			return nil, err
-		}
-		if err := json.NewEncoder(client).Encode(remoteRequest{ID: 7, Op: "ping"}); err != nil {
-			client.Close()
-			return nil, err
-		}
-		var response remoteResponse
-		decodeErr := json.NewDecoder(client).Decode(&response)
-		client.Close()
-		serveErr := <-serverDone
-		if decodeErr != nil {
-			return nil, decodeErr
-		}
-		if serveErr != nil {
-			return nil, serveErr
-		}
-		return &response, nil
-	}
-	response, err := serveOnce(ticket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.ID != 7 || response.Protocol != remoteProtocolVersion {
-		t.Fatalf("authenticated ping response = %#v", response)
-	}
-	if _, err := serveOnce(ticket); err == nil {
-		t.Fatal("replayed authentication ticket was accepted")
-	}
-}
+func (*remoteTestBackend) AttachCmd(string) *exec.Cmd     { return exec.Command("true") }
+func (*remoteTestBackend) List() ([]sessionInfo, error)   { return nil, nil }
+func (*remoteTestBackend) Kill(string) error              { return nil }
+func (*remoteTestBackend) History(string) (string, error) { return "", nil }
+func (*remoteTestBackend) Send(string, string) error      { return nil }
 
 func TestRemoteToolCommandPrefersDefaultInstall(t *testing.T) {
 	home := t.TempDir()
@@ -253,51 +70,6 @@ func TestRemoteToolCommandExplainsMissingInstall(t *testing.T) {
 	}
 }
 
-func TestTCPRemoteCreateUsesRemoteSessionBackend(t *testing.T) {
-	previous := selectedBackend
-	serverBackend := &tcpRemoteTestBackend{created: make(chan sessionInfo, 1)}
-	setBackend(serverBackend)
-	t.Cleanup(func() { setBackend(previous) })
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	key := bytes.Repeat([]byte{0x42}, remoteTicketKeyBytes)
-	ticket, err := issueRemoteTCPAuthTicket(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		_ = serveRemoteTCPConn(conn, key, newRemoteTicketReplayCache())
-	}()
-
-	client, err := newTCPSessionBackendWithTicket(listener.Addr().String(), "127.0.0.1", ticket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-
-	const cwd = "/remote/work/project"
-	if err := client.Create("remote-project", cwd, "codex --approve-for-me"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-serverBackend.created:
-		if want := (sessionInfo{Name: "remote-project", CWD: cwd, Command: "codex --approve-for-me"}); got != want {
-			t.Fatalf("remote create request = %#v, want %#v", got, want)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("remote create did not reach the server session backend")
-	}
-}
-
 // requestCountingConn counts the requests that arrive on a connection.
 type requestCountingConn struct {
 	net.Conn
@@ -320,34 +92,20 @@ func (c *requestCountingConn) Read(p []byte) (int, error) {
 // scrolling crawl on a slow link.
 func TestRemoteDirectoriesAreFetchedOnce(t *testing.T) {
 	previous := selectedBackend
-	setBackend(&tcpRemoteTestBackend{created: make(chan sessionInfo, 1)})
+	setBackend(&remoteTestBackend{created: make(chan sessionInfo, 1)})
 	t.Cleanup(func() { setBackend(previous) })
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	key := bytes.Repeat([]byte{0x42}, remoteTicketKeyBytes)
-	ticket, err := issueRemoteTCPAuthTicket(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	counting := &requestCountingConn{counts: map[string]int{}}
+	clientConn, serverConn := net.Pipe()
+	counting := &requestCountingConn{Conn: serverConn, counts: map[string]int{}}
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		counting.Conn = conn
-		_ = serveRemoteTCPConn(counting, key, newRemoteTicketReplayCache())
+		defer serverConn.Close()
+		_ = serveRemote(counting, counting)
 	}()
-
-	client, err := newTCPSessionBackendWithTicket(listener.Addr().String(), "127.0.0.1", ticket)
+	mux, err := muxHandshake(clientConn, bufio.NewReader(clientConn), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	client := &remoteSessionBackend{name: "ssh:test", client: mux}
 	defer client.Close()
 
 	var home string
@@ -373,7 +131,7 @@ func TestRemoteDirectoriesAreFetchedOnce(t *testing.T) {
 
 func TestSSHRemoteProtocolCanCreateSession(t *testing.T) {
 	previous := selectedBackend
-	serverBackend := &tcpRemoteTestBackend{created: make(chan sessionInfo, 1)}
+	serverBackend := &remoteTestBackend{created: make(chan sessionInfo, 1)}
 	setBackend(serverBackend)
 	t.Cleanup(func() { setBackend(previous) })
 
@@ -403,17 +161,6 @@ func TestSSHRemoteProtocolCanCreateSession(t *testing.T) {
 	}
 }
 
-func TestRemoteAddressRejectsBadPorts(t *testing.T) {
-	for _, in := range []string{"host:abc", "host:0", "host:99999", "host:-1"} {
-		if got, err := normalizeRemoteTCPAddress(in); err == nil {
-			t.Errorf("normalizeRemoteTCPAddress(%q) = %q, want an error", in, got)
-		}
-	}
-	if got, err := normalizeRemoteListenAddress(":65535"); err != nil || got != ":65535" {
-		t.Errorf("listen :65535 = %q, %v", got, err)
-	}
-}
-
 func TestValidateSSHHost(t *testing.T) {
 	for _, bad := range []string{"", " ", "-oProxyCommand=x", "a b", "a\nb"} {
 		if validateSSHHost(bad) == nil {
@@ -425,36 +172,5 @@ func TestValidateSSHHost(t *testing.T) {
 	}
 	if args := sshArgs(false, "host", "cmd"); args[len(args)-3] != "--" {
 		t.Errorf("host is not separated from ssh options: %v", args)
-	}
-}
-
-func TestEnsureRemoteTicketKeyIsSafeToRaceAndLeavesNoTemporaryFile(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	keys := make(chan []byte, 8)
-	errs := make(chan error, 8)
-	for i := 0; i < 8; i++ {
-		go func() {
-			k, err := ensureRemoteTicketKey()
-			keys <- k
-			errs <- err
-		}()
-	}
-	var first []byte
-	for i := 0; i < 8; i++ {
-		k, err := <-keys, <-errs
-		if err != nil {
-			t.Fatal(err)
-		}
-		if first == nil {
-			first = k
-		} else if string(first) != string(k) {
-			t.Fatal("concurrent callers got different keys")
-		}
-	}
-	entries, _ := os.ReadDir(remoteConfigDir())
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".ticket-key-") {
-			t.Fatalf("temporary key file left behind: %s", e.Name())
-		}
 	}
 }

@@ -89,7 +89,7 @@ func TestMuxFrameRoundTrip(t *testing.T) {
 
 func TestMuxRequestsAndSessionsShareOneConnection(t *testing.T) {
 	previous := selectedBackend
-	setBackend(&tcpRemoteTestBackend{created: make(chan sessionInfo, 1)})
+	setBackend(&remoteTestBackend{created: make(chan sessionInfo, 1)})
 	t.Cleanup(func() { setBackend(previous) })
 
 	host := newFakeHost("alpha", "beta")

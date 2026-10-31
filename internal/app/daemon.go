@@ -31,18 +31,6 @@ func runDaemon() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sig)
-	remoteStop := make(chan struct{})
-	var remoteDone chan struct{}
-	if address, err := loadRemoteListenConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "LAM daemon: remote listener configuration: %v\n", err)
-	} else if address != "" {
-		remoteDone = make(chan struct{})
-		go func() {
-			defer close(remoteDone)
-			maintainRemoteTCPListener(address, remoteStop)
-		}()
-	}
-
 	ticker := time.NewTicker(daemonPollInterval)
 	defer ticker.Stop()
 
@@ -55,33 +43,7 @@ func runDaemon() {
 			checkUnread(prevStates)
 		case s := <-sig:
 			fmt.Printf("LAM daemon: caught %s, exiting\n", s)
-			close(remoteStop)
-			if remoteDone != nil {
-				<-remoteDone
-			}
 			return
-		}
-	}
-}
-
-func maintainRemoteTCPListener(address string, stop <-chan struct{}) {
-	for {
-		err := serveRemoteTCPWithStop(address, stop)
-		if err == nil {
-			return
-		}
-		fmt.Fprintf(os.Stderr, "LAM daemon: remote listener failed: %v; retrying in 5s\n", err)
-		timer := time.NewTimer(5 * time.Second)
-		select {
-		case <-stop:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return
-		case <-timer.C:
 		}
 	}
 }

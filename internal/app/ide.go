@@ -1351,7 +1351,7 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		}
 		title := "Sessions"
 		if remoteMode {
-			remoteName := strings.TrimPrefix(strings.TrimPrefix(backend().Name(), "ssh:"), "tcp:")
+			remoteName := strings.TrimPrefix(backend().Name(), "ssh:")
 			title += " · " + remoteName
 		}
 		if filter != "" {

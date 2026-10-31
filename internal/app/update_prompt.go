@@ -105,7 +105,7 @@ func pushBinary(host string) error {
 	}
 	defer f.Close()
 	script := `mkdir -p "$HOME/.local/bin" && cat > "$HOME/.local/bin/lam.new" && chmod 755 "$HOME/.local/bin/lam.new" && mv "$HOME/.local/bin/lam.new" "$HOME/.local/bin/lam"` +
-		// A running daemon, and the TCP listener in it, is still the old build.
+		// A running daemon is still the old build.
 		`; if [ -f "$HOME/.config/systemd/user/lam-daemon.service" ] || [ -f "$HOME/Library/LaunchAgents/com.lam.daemon.plist" ]; then "$HOME/.local/bin/lam" install-service || true; fi`
 	cmd := exec.Command("ssh", "-T", "--", host, script)
 	cmd.Stdin, cmd.Stderr = f, os.Stderr
