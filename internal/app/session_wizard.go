@@ -15,7 +15,9 @@ const (
 
 type sessionWizard struct {
 	stage             string
-	sessions          []sessionInfo // existing sessions, which the generated name must not collide with
+	host              string                 // the remote machine the session is for; empty for this one
+	src               sessionDirectorySource // where its folders are browsed; nil means the default
+	sessions          []sessionInfo          // existing sessions, which the generated name must not collide with
 	prompt            string
 	defaultDir        string
 	defaultDirDisplay string

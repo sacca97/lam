@@ -24,6 +24,8 @@ func TestClassifyActivity(t *testing.T) {
 		"silent build is active":           {activitySignals{Now: now, LastOutputAt: stale, CPUBusy: true}, "active"},
 		"waiting agent is quiet":           {activitySignals{Now: now, LastOutputAt: recent, RecentBytes: 4000, AgentStatus: "waiting"}, "quiet"},
 		"waiting agent with busy children": {activitySignals{Now: now, LastOutputAt: recent, CPUBusy: true, AgentStatus: "waiting"}, "active"},
+		"an agent's CPU alone is not work": {activitySignals{Now: now, LastOutputAt: stale, CPUBusy: true, Agent: true}, "quiet"},
+		"an agent computing and printing":  {activitySignals{Now: now, LastOutputAt: recent, RecentBytes: 100, CPUBusy: true, Agent: true}, "active"},
 		"agent reports work":               {activitySignals{Now: now, LastOutputAt: stale, AgentStatus: "working"}, "active"},
 		"busy shell with no child":         {activitySignals{Now: now, IdlePrompt: true, CPUBusy: true}, "active"},
 	} {
@@ -68,9 +70,13 @@ func TestCPUSamplerSeesBusyAndIdleProcesses(t *testing.T) {
 	now := time.Now()
 	busy.Busy(now)
 	idle.Busy(now)
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(900 * time.Millisecond)
 	later := now.Add(activityCPUInterval + time.Second) // the sampler's own clock
-	if !busy.Busy(later) {
+	busy.Busy(later)
+	idle.Busy(later)
+	time.Sleep(900 * time.Millisecond)
+	later = later.Add(activityCPUInterval + time.Second)
+	if !busy.Busy(later) { // two busy samples in a row
 		t.Error("a spinning process was not seen as busy")
 	}
 	if idle.Busy(later) {
@@ -129,8 +135,11 @@ func TestCPUSamplerDoesNotAverageOverALongGap(t *testing.T) {
 	if s.Busy(now.Add(5 * time.Minute)) {
 		t.Error("answered from an average over the gap")
 	}
-	time.Sleep(600 * time.Millisecond)
-	if !s.Busy(now.Add(5*time.Minute + activityCPUInterval + time.Second)) {
+	time.Sleep(900 * time.Millisecond)
+	at := now.Add(5*time.Minute + activityCPUInterval + time.Second)
+	s.Busy(at)
+	time.Sleep(900 * time.Millisecond)
+	if !s.Busy(at.Add(activityCPUInterval + time.Second)) {
 		t.Error("the spinning process was not seen after the fresh baseline")
 	}
 }

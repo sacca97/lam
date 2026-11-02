@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -11,6 +12,14 @@ var version = "dev"
 
 // Run executes the LAM command line interface.
 func Run() {
+	enterLoginEnvironment()
+	// Started as lam-gui (the GUI build's name, as a desktop launcher runs it):
+	// open the window. With arguments it is an ordinary lam, so session hosts
+	// it spawns from its own executable keep working.
+	if strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") == "lam-gui" && (len(os.Args) == 1 || os.Args[1] == "ssh") {
+		guiCmd(os.Args[1:]) // lam-gui, or lam-gui ssh HOST
+		return
+	}
 	// Subcommands
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -69,6 +78,9 @@ func Run() {
 				os.Exit(1)
 			}
 			return
+		case "gui":
+			guiCmd(os.Args[2:])
+			return
 		case "start":
 			startSessionCmd(os.Args[2:])
 			return
@@ -77,17 +89,28 @@ func Run() {
 			return
 		case "ssh":
 			if len(os.Args) < 3 {
-				fmt.Fprintln(os.Stderr, "usage: lam ssh <host> [--prompt-me]")
+				fmt.Fprintln(os.Stderr, "usage: lam ssh <host> [--tui] [--prompt-me] [--builtin]")
 				os.Exit(2)
 			}
-			promptMe := false
+			promptMe, tui := false, false
 			for _, arg := range os.Args[3:] {
 				if arg == "--prompt-me" {
 					promptMe = true
+				} else if arg == "--builtin" {
+					builtinSSH = true
+				} else if arg == "--tui" {
+					tui = true
 				} else {
 					fmt.Fprintf(os.Stderr, "unknown lam ssh option %q\n", arg)
 					os.Exit(2)
 				}
+			}
+			// The window is the default; it opens detached and the terminal is
+			// free again. The terminal interface is for --tui, a "ui": "tui"
+			// setting, or where no window can open.
+			if !tui && !promptMe && preferGUI() && launchGUI("gui", "ssh", os.Args[2]) {
+				fmt.Fprintf(os.Stderr, "opened %s in a window (lam ssh %s --tui for the terminal)\n", os.Args[2], os.Args[2])
+				return
 			}
 			if err := runSSH(os.Args[2], promptMe); err != nil {
 				fmt.Fprintf(os.Stderr, "  SSH: %v\n", err)
@@ -158,6 +181,7 @@ func printHelp() {
 	fmt.Println("  send <session> <text>  Type text into a session and press Enter")
 	fmt.Println("  restore [--list]    Reopen sessions that ended with a reboot or crash, resuming their agents")
 	fmt.Println("  ssh <host>          Open this UI for sessions on an SSH host")
+	fmt.Println("                      --builtin uses the built-in SSH client (or LAM_SSH=builtin)")
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  --prompt-me         Ask for a starting prompt when creating sessions")

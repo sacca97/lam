@@ -10,6 +10,10 @@
 # to check the symbols. Those stubs are generated here from the symbols the
 # installed Go toolchain imports, so they track Go upgrades. They only satisfy
 # the linker: at run time the Mac binds to its own frameworks.
+#
+# With MACOS_SDK set to a macOS SDK directory (MacOSX.sdk, from Xcode or the
+# Command Line Tools), the real frameworks are used instead of the stubs, and
+# GO_TAGS=gui builds the Gio GUI: see scripts/cross-darwin-gui.sh.
 set -euo pipefail
 
 [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ] || { echo "run this on Linux x86_64" >&2; exit 1; }
@@ -23,6 +27,12 @@ PREFIX="$DEPS/libghostty-darwin-arm64"
 COMMIT="$(cat "$DEPS/libghostty.commit")"
 STUBS="$DEPS/darwin-stubs"
 OUT="${1:-lam-darwin-arm64}"
+SDK="${MACOS_SDK:-}"
+TAGS="${GO_TAGS:-}"
+if [ -n "$SDK" ] && [ ! -d "$SDK/System/Library/Frameworks" ]; then
+    echo "MACOS_SDK=$SDK has no System/Library/Frameworks: point it at MacOSX.sdk" >&2
+    exit 1
+fi
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 
 if [ ! -f "$PREFIX/lib/libghostty-vt.a" ] || [ "$(cat "$PREFIX/commit" 2>/dev/null)" != "$COMMIT" ]; then
@@ -33,7 +43,7 @@ fi
 
 rm -rf "$STUBS"
 mkdir -p "$STUBS"
-python3 - "$STUBS" "$(go env GOROOT)" <<'PY'
+[ -n "$SDK" ] || python3 - "$STUBS" "$(go env GOROOT)" <<'PY'
 import re, subprocess, sys
 out, goroot = sys.argv[1], sys.argv[2]
 src = subprocess.run("grep -rh cgo_import_dynamic crypto/x509/internal/macos net internal",
@@ -58,6 +68,11 @@ for lib, syms in libs.items():
                 f"    symbols:         [ {', '.join(sorted(syms))} ]\n...\n")
 PY
 
+SDKFLAGS=""
+[ -z "$SDK" ] || SDKFLAGS="-isysroot $SDK -isystem $SDK/usr/include -Wno-unguarded-availability-new -iframework $SDK/System/Library/Frameworks -L$SDK/usr/lib"
+LDF="-F$STUBS -L$STUBS"
+[ -z "$SDK" ] || LDF="-F$SDK/System/Library/Frameworks -L$SDK/usr/lib"
+
 # Go passes "-framework CoreFoundation" once for every package that needs it
 # and Zig's linker records each one, which dyld rejects as a duplicate dylib.
 # The wrapper keeps the first of each framework.
@@ -76,11 +91,11 @@ while [ \$n -gt 0 ]; do
         set -- "\$@" "\$a"
     fi
 done
-exec "$ZIG" cc -target $TARGET "\$@"
+exec "$ZIG" cc -target $TARGET $SDKFLAGS "\$@"
 EOF
 chmod +x "$STUBS/cc"
 
 PKG_CONFIG_PATH="$PREFIX/share/pkgconfig" GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 CC="$STUBS/cc" \
-    CGO_LDFLAGS="-F$STUBS -L$STUBS" \
-    go build -trimpath -ldflags "-s -w -X github.com/sacca97/lam/internal/app.version=$VERSION" -o "$OUT" ./cmd/lam
+    CGO_LDFLAGS="$LDF" \
+    go build ${TAGS:+-tags "$TAGS"} -trimpath -ldflags "-s -w -X github.com/sacca97/lam/internal/app.version=$VERSION" -o "$OUT" ./cmd/lam
 echo "  built $OUT ($VERSION)"

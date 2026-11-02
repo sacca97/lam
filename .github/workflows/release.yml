@@ -2,7 +2,7 @@ name: release
 
 # scripts/release.sh builds lam locally and puts the executables under release/
 # in the commit a tag points at. Pushing that tag creates the GitHub release with
-# lam-<os>-<arch> for each platform; GitHub adds the source tarball and records a
+# lam-<os>-<arch> for each platform, plus the desktop and Android apps; GitHub adds the source tarball and records a
 # SHA-256 digest per asset, which `lam update` and install.sh check. Nothing is
 # compiled here.
 on:

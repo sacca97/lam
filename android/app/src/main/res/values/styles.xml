@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Lam" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#111411</item>
+        <item name="android:colorBackground">#111411</item>
+        <item name="android:statusBarColor">#111411</item>
+        <item name="android:navigationBarColor">#111411</item>
+        <item name="android:colorAccent">#8cc88c</item>
+        <item name="android:textColorPrimary">#e6ebe6</item>
+        <item name="android:textColorSecondary">#8a948a</item>
+    </style>
+</resources>

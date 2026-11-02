@@ -18,8 +18,13 @@ func TestResumeCommand(t *testing.T) {
 		"pi --continue":                        "pi --continue",
 		"pi -- 'start here'":                   "pi --continue",
 		"opencode":                             "opencode --continue",
-		`exec "${SHELL:-/bin/sh}" -l -i`:       `exec "${SHELL:-/bin/sh}" -l -i`,
-		"htop":                                 "htop",
+		"agy":                                  "agy --continue",
+		"agy --mode auto":                      "agy --mode auto --continue",
+		"agy --mode auto --prompt-interactive 'x'": "agy --mode auto --continue",
+		"agy --conversation abc":                   "agy --conversation abc",
+		"agy --prompt-interactive 'fix it'":        "agy --continue",
+		`exec "${SHELL:-/bin/sh}" -l -i`:           `exec "${SHELL:-/bin/sh}" -l -i`,
+		"htop":                                     "htop",
 	} {
 		if got := resumeCommand(command); got != want {
 			t.Errorf("resumeCommand(%q) = %q, want %q", command, got, want)
@@ -67,5 +72,21 @@ func TestRemoteRestoreOps(t *testing.T) {
 	}
 	if left := readManifest(); len(left) != 0 {
 		t.Fatalf("manifest = %#v", left)
+	}
+}
+
+func TestLauncherCmdStartsAgentsInAutoMode(t *testing.T) {
+	for launcher, want := range map[string]string{
+		"claude": "claude --permission-mode auto",
+		"codex":  "codex --approve-for-me",
+		"agy":    "agy --mode auto",
+		"pi":     "pi",
+	} {
+		if got := launcherCmd(launcher, ""); got != want {
+			t.Errorf("launcherCmd(%q) = %q, want %q", launcher, got, want)
+		}
+	}
+	if got := launcherCmd("agy", "fix it"); got != "agy --mode auto --prompt-interactive 'fix it'" {
+		t.Errorf("with a prompt: %q", got)
 	}
 }

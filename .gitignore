@@ -3,3 +3,10 @@
 /coverage.out
 /coverage.html
 *.test
+/lam-gui
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/app/libs/
+/dist-darwin/

@@ -26,7 +26,7 @@ func getLauncher() string {
 		return "claude"
 	}
 	l := strings.TrimSpace(string(data))
-	if l == "claude" || l == "codex" || l == "opencode" || l == "pi" {
+	if l == "claude" || l == "codex" || l == "opencode" || l == "pi" || l == "agy" {
 		return l
 	}
 	return "claude"
@@ -42,7 +42,7 @@ type sessionLauncherLister interface {
 	AvailableLaunchers() ([]string, error)
 }
 
-var supportedLaunchers = []string{"claude", "codex", "opencode", "pi"}
+var supportedLaunchers = []string{"claude", "codex", "opencode", "pi", "agy"}
 
 func availableSessionLaunchers() ([]string, error) {
 	if remote, ok := backend().(sessionLauncherLister); ok {
@@ -103,6 +103,8 @@ func launcherLabel(launcher string) string {
 		return "OpenCode"
 	case "pi":
 		return "Pi"
+	case "agy":
+		return "Antigravity"
 	default:
 		return launcher
 	}
@@ -116,6 +118,9 @@ func autoApproveFlag(launcher string) string {
 	}
 	if launcher == "claude" {
 		return "--permission-mode auto"
+	}
+	if launcher == "agy" {
+		return "--mode auto"
 	}
 	return ""
 }
@@ -131,6 +136,8 @@ func launcherCmd(launcher, prompt string) string {
 			cmd += " " + shellQuote(prompt)
 		case "pi":
 			cmd += " -- " + shellQuote(prompt)
+		case "agy":
+			cmd += " --prompt-interactive " + shellQuote(prompt)
 		}
 	}
 	return cmd

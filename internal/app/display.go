@@ -215,11 +215,21 @@ func listViewport(total, cursor, available int) (int, int) {
 	return start, end
 }
 
+// groupKey identifies a project in the collapsed set: its folder, qualified by
+// the host when it is not on this machine.
+func groupKey(s sessionInfo) string {
+	if s.Host == "" {
+		return s.CWD
+	}
+	return s.Host + "\x00" + s.CWD
+}
+
 // sidebarRow is one entry of the session list: a project heading or a session.
 type sidebarRow struct {
 	header    bool
 	label     string // project name, for a heading
 	cwd       string // the folder a heading stands for
+	host      string // the machine that folder is on; empty for this one
 	count     int    // sessions under a heading
 	collapsed bool   // a heading whose sessions are hidden
 	session   int    // index into the visible sessions, for a session
@@ -242,6 +252,7 @@ func sessionProject(s sessionInfo) string {
 // project part is redundant there. A name that does not follow that pattern,
 // such as a renamed session, is shown whole.
 func sessionLabel(s sessionInfo) string {
+	s.Name = shortName(s.Name)
 	base := sessionNameSlug(filepath.Base(filepath.Clean(s.CWD)))
 	if len(base) > 48 {
 		base = strings.Trim(base[:48], "-")
@@ -266,6 +277,9 @@ func sessionLabel(s sessionInfo) string {
 // sessionLess orders sessions by project, then name, so those in one folder
 // are next to each other.
 func sessionLess(a, b sessionInfo) bool {
+	if a.Host != b.Host {
+		return a.Host < b.Host
+	}
 	if pa, pb := sessionProject(a), sessionProject(b); pa != pb {
 		return pa < pb
 	}
@@ -284,19 +298,19 @@ func buildSidebarRows(sessions []sessionInfo, narrow bool, collapsed map[string]
 	rows := make([]sidebarRow, 0, len(sessions)*2)
 	hidden := ""
 	for i := 0; i < len(sessions); i++ {
-		if !narrow && (i == 0 || sessions[i-1].CWD != sessions[i].CWD) {
+		if !narrow && (i == 0 || sessions[i-1].CWD != sessions[i].CWD || sessions[i-1].Host != sessions[i].Host) {
 			count := 1
-			for j := i + 1; j < len(sessions) && sessions[j].CWD == sessions[i].CWD; j++ {
+			for j := i + 1; j < len(sessions) && sessions[j].CWD == sessions[i].CWD && sessions[j].Host == sessions[i].Host; j++ {
 				count++
 			}
-			folded := collapsed[sessions[i].CWD]
+			folded := collapsed[groupKey(sessions[i])]
 			hidden = ""
 			if folded {
-				hidden = sessions[i].CWD
+				hidden = groupKey(sessions[i])
 			}
-			rows = append(rows, sidebarRow{header: true, label: sessionProject(sessions[i]), cwd: sessions[i].CWD, count: count, collapsed: folded, height: 1})
+			rows = append(rows, sidebarRow{header: true, label: sessionProject(sessions[i]), cwd: sessions[i].CWD, host: sessions[i].Host, count: count, collapsed: folded, height: 1})
 		}
-		if hidden != "" && hidden == sessions[i].CWD && i != selected {
+		if hidden != "" && hidden == groupKey(sessions[i]) && i != selected {
 			continue
 		}
 		rows = append(rows, sidebarRow{session: i, height: 1})
@@ -311,9 +325,9 @@ func nextSession(sessions []sessionInfo, cursor, step int, collapsed map[string]
 	if cursor < 0 || cursor >= len(sessions) {
 		return cursor + step
 	}
-	here := sessions[cursor].CWD
+	here := groupKey(sessions[cursor])
 	next := cursor + step
-	for next >= 0 && next < len(sessions) && collapsed[here] && sessions[next].CWD == here {
+	for next >= 0 && next < len(sessions) && collapsed[here] && groupKey(sessions[next]) == here {
 		next += step
 	}
 	return next

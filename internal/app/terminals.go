@@ -11,6 +11,7 @@ import (
 
 // terminalLabelFor is the label a session's terminal carries in its name.
 func terminalLabelFor(owner string) string {
+	_, owner = splitHost(owner)
 	label := sessionNameSlug(owner)
 	if label == "" {
 		label = "session"
@@ -23,6 +24,7 @@ func terminalLabelFor(owner string) string {
 
 // terminalSessionLabel is the owner label in the name of a terminal session.
 func terminalSessionLabel(name string) (string, bool) {
+	_, name = splitHost(name)
 	rest, ok := strings.CutPrefix(name, "term-")
 	if !ok {
 		return "", false
@@ -38,15 +40,15 @@ func terminalSessionLabel(name string) (string, bool) {
 // the sidebar shows agents and not their shells. A terminal whose owner is gone
 // stays listed, where it can be seen and stopped.
 func hideOwnedTerminals(list []sessionInfo) []sessionInfo {
-	owners := make(map[string]bool)
+	owners := make(map[string]bool) // by machine and label
 	for _, s := range list {
 		if _, isTerminal := terminalSessionLabel(s.Name); !isTerminal {
-			owners[terminalLabelFor(s.Name)] = true
+			owners[s.Host+"\x00"+terminalLabelFor(s.Name)] = true
 		}
 	}
 	visible := make([]sessionInfo, 0, len(list))
 	for _, s := range list {
-		if label, isTerminal := terminalSessionLabel(s.Name); isTerminal && owners[label] {
+		if label, isTerminal := terminalSessionLabel(s.Name); isTerminal && owners[s.Host+"\x00"+label] {
 			continue
 		}
 		visible = append(visible, s)
@@ -59,12 +61,13 @@ func hideOwnedTerminals(list []sessionInfo) []sessionInfo {
 // none is returned, so one session never stops or renames another's shell.
 func ownedTerminals(list []sessionInfo, owner string) []sessionInfo {
 	label := terminalLabelFor(owner)
+	host, _ := splitHost(owner)
 	var out []sessionInfo
 	if terminalLabelAmbiguous(list, owner) {
 		return nil
 	}
 	for _, s := range list {
-		if l, isTerminal := terminalSessionLabel(s.Name); isTerminal && l == label {
+		if l, isTerminal := terminalSessionLabel(s.Name); isTerminal && l == label && s.Host == host {
 			out = append(out, s)
 		}
 	}
@@ -81,15 +84,17 @@ func ownedTerminalsNow(owner string) []sessionInfo {
 
 // renamedTerminal is a terminal's name once its owner is called newOwner.
 func renamedTerminal(name, newOwner string) string {
-	return fmt.Sprintf("term-%s-%s", terminalLabelFor(newOwner), name[strings.LastIndexByte(name, '-')+1:])
+	host, _ := splitHost(name)
+	return fmt.Sprintf("%sterm-%s-%s", hostPrefix(host), terminalLabelFor(newOwner), name[strings.LastIndexByte(name, '-')+1:])
 }
 
 // terminalLabelAmbiguous reports whether another listed session would give the
 // same terminal label as owner.
 func terminalLabelAmbiguous(list []sessionInfo, owner string) bool {
 	label := terminalLabelFor(owner)
+	host, _ := splitHost(owner)
 	for _, s := range list {
-		if _, isTerminal := terminalSessionLabel(s.Name); !isTerminal && s.Name != owner && terminalLabelFor(s.Name) == label {
+		if _, isTerminal := terminalSessionLabel(s.Name); !isTerminal && s.Host == host && s.Name != owner && terminalLabelFor(s.Name) == label {
 			return true
 		}
 	}

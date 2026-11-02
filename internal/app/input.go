@@ -292,6 +292,10 @@ func writeAll(w io.Writer, data []byte) error {
 	return nil
 }
 
+// hasPending reports whether bytes are held back, waiting to see whether an
+// escape sequence completes.
+func (d *terminalInputDecoder) hasPending() bool { return len(d.pending) > 0 }
+
 func (d *terminalInputDecoder) flushAfter(now time.Time, timeout time.Duration) []inputEvent {
 	if len(d.pending) == 0 || now.Sub(d.lastUpdate) < timeout {
 		return nil
@@ -307,6 +311,10 @@ func globalKeyAction(seq string) string {
 		return "prev"
 	case "\x1b[1;5B":
 		return "next"
+	case "\x1b[I": // focus reporting: the window gained or lost focus
+		return "window-focus"
+	case "\x1b[O":
+		return "window-blur"
 	}
 	return ""
 }

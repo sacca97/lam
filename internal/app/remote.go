@@ -83,9 +83,40 @@ func validateSSHHost(host string) error {
 	return nil
 }
 
+// builtinSSH selects the in-process SSH client instead of the ssh binary
+// (`lam ssh --builtin`, or LAM_SSH=builtin).
+var builtinSSH = os.Getenv("LAM_SSH") == "builtin"
+
+// guiSSHOptions, when set, supplies the client's options in place of the
+// terminal's: its questions for a connection a person is waiting on, and for
+// a reconnect only what needs no one (a remembered password).
+var guiSSHOptions func(unattended bool) SSHOptions
+
+// sshGlobalsMu guards the two settings above: the GUI changes them while
+// connections of earlier hosts may still reconnect.
+var sshGlobalsMu sync.RWMutex
+
 func startRemoteRPC(host string, unattended bool) (*muxClient, error) {
+	sshGlobalsMu.RLock()
+	builtin := builtinSSH
+	sshGlobalsMu.RUnlock()
+	return startRemoteRPCVia(host, unattended, builtin)
+}
+
+// startRemoteRPCVia connects with the ssh binary or lam's own client.
+func startRemoteRPCVia(host string, unattended, builtin bool) (*muxClient, error) {
 	if err := validateSSHHost(host); err != nil {
 		return nil, err
+	}
+	sshGlobalsMu.RLock()
+	hook := guiSSHOptions
+	sshGlobalsMu.RUnlock()
+	if builtin {
+		opts := SSHOptionsForCLI(unattended)
+		if hook != nil {
+			opts = hook(unattended)
+		}
+		return startBuiltinRemoteRPC(host, unattended, opts)
 	}
 	cmd, tail, err := newSSHCommand(unattended, host, remoteToolCommand("remote"))
 	if err != nil {
@@ -129,7 +160,9 @@ func startRemoteRPC(host string, unattended bool) (*muxClient, error) {
 // connection (a reconnect while the interface is drawing) must never wait for
 // a password or a host-key question, so it fails instead.
 func sshArgs(unattended bool, host, command string) []string {
-	args := []string{"-T", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"}
+	// Without a tty ssh marks its packets as bulk traffic (DSCP CS1), which
+	// Wi-Fi puts in the background queue; this connection carries keystrokes.
+	args := []string{"-T", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-o", "IPQoS=af21"}
 	if unattended {
 		args = append(args, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 	}
@@ -196,11 +229,18 @@ func muxHandshake(rw io.ReadWriteCloser, reader *bufio.Reader, cleanup func()) (
 	}
 	result := make(chan outcome, 1)
 	go func() {
-		ask := func(request remoteRequest) (remoteResponse, error) {
+		// Both requests go out at once: the host answers them in order, so the
+		// handshake costs one round trip instead of two.
+		var batch []byte
+		for _, request := range []remoteRequest{{ID: 1, Op: "ping"}, {ID: 2, Op: "mux"}} {
 			data, _ := json.Marshal(request)
-			if err := writeAll(rw, append(data, '\n')); err != nil {
-				return remoteResponse{}, err
-			}
+			batch = append(append(batch, data...), '\n')
+		}
+		if err := writeAll(rw, batch); err != nil {
+			result <- outcome{err: err}
+			return
+		}
+		answer := func(request remoteRequest) (remoteResponse, error) {
 			line, err := readRemoteLine(reader, maxFramePayload)
 			if err != nil {
 				return remoteResponse{}, fmt.Errorf("the remote lam closed the connection: %w", err)
@@ -214,22 +254,24 @@ func muxHandshake(rw io.ReadWriteCloser, reader *bufio.Reader, cleanup func()) (
 			}
 			return response, nil
 		}
-		response, err := ask(remoteRequest{ID: 1, Op: "ping"})
+		response, err := answer(remoteRequest{Op: "ping"})
 		if err == nil && response.Protocol != remoteProtocolVersion {
 			err = &protocolMismatchError{remote: response.Protocol, remoteVersion: response.Version}
 		}
 		if err == nil {
-			_, err = ask(remoteRequest{ID: 2, Op: "mux"})
+			_, err = answer(remoteRequest{Op: "mux"})
 		}
 		if err != nil {
 			result <- outcome{err: err}
 			return
 		}
-		result <- outcome{client: newMuxClient(rw, reader, func() {
+		client := newMuxClient(rw, reader, func() {
 			if cleanup != nil {
 				cleanupOnce.Do(cleanup)
 			}
-		})}
+		})
+		client.version = response.Version
+		result <- outcome{client: client}
 	}()
 	select {
 	case got := <-result:
@@ -336,13 +378,48 @@ func (b *remoteSessionBackend) OpenAttachStream(name string, cols, rows int) (io
 }
 
 func newSSHSessionBackend(host string) (*sshSessionBackend, error) {
-	client, err := startRemoteRPC(host, false)
+	sshGlobalsMu.RLock()
+	builtin := builtinSSH
+	sshGlobalsMu.RUnlock()
+	return newSSHSessionBackendVia(host, builtin)
+}
+
+func newSSHSessionBackendVia(host string, builtin bool) (*sshSessionBackend, error) {
+	client, err := startRemoteRPCVia(host, false, builtin)
 	if err != nil {
 		return nil, err
 	}
 	b := &sshSessionBackend{host: host, remoteSessionBackend: remoteSessionBackend{name: "ssh:" + host, client: client}}
-	b.supervise(func() (*muxClient, error) { return startRemoteRPC(host, true) })
+	b.supervise(func() (*muxClient, error) { return startRemoteRPCVia(host, true, builtin) })
 	return b, nil
+}
+
+// newSSHSessionBackendKeysFirst connects the way people expect: with the ssh
+// binary and no questions, which uses their keys, agent, certificates and
+// ~/.ssh/config exactly as in a terminal. Only when that is refused for a
+// reason a person can fix (a password is needed, the host is new) does it
+// fall back to lam's own client, which can ask in the window.
+func newSSHSessionBackendKeysFirst(host string) (*sshSessionBackend, error) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		return newSSHSessionBackendVia(host, true)
+	}
+	// host:port is lam's spelling; the ssh binary would take it as a name.
+	if _, _, port, err := parseSSHHost(host); err == nil && port != "" {
+		return newSSHSessionBackendVia(host, true)
+	}
+	client, err := startRemoteRPCVia(host, true, false) // BatchMode: never asks
+	if err == nil {
+		b := &sshSessionBackend{host: host, remoteSessionBackend: remoteSessionBackend{name: "ssh:" + host, client: client}}
+		b.supervise(func() (*muxClient, error) { return startRemoteRPCVia(host, true, false) })
+		return b, nil
+	}
+	// A host that cannot be reached will not be reachable the second time.
+	for _, down := range []string{"timed out", "Connection refused", "No route to host", "Network is unreachable"} {
+		if strings.Contains(err.Error(), down) {
+			return nil, err
+		}
+	}
+	return newSSHSessionBackendVia(host, true)
 }
 
 func remoteToolCommand(args ...string) string {
@@ -401,6 +478,18 @@ type linkMonitor interface {
 	LinkStatus() linkStatus
 }
 
+// permanentSSHFailure is an error that waiting will not cure.
+func permanentSSHFailure(msg string) bool {
+	msg = strings.ToLower(msg)
+	for _, s := range []string{"unable to authenticate", "host identification has changed", "was not accepted",
+		"not in known_hosts", "no remembered password", "no password given", "no passphrase given", "no ssh credentials", "not supported by lam"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *remoteSessionBackend) cur() *muxClient {
 	b.linkMu.Lock()
 	defer b.linkMu.Unlock()
@@ -410,7 +499,17 @@ func (b *remoteSessionBackend) cur() *muxClient {
 func (b *remoteSessionBackend) LinkStatus() linkStatus {
 	b.linkMu.Lock()
 	defer b.linkMu.Unlock()
-	return linkStatus{Up: b.attempt == 0, Gen: b.gen, Attempt: b.attempt, RetryAt: b.retryAt, Err: b.lastErr}
+	// The supervisor learns of a drop a moment after the client does; until
+	// it has, the link is already not up.
+	dead := false
+	if b.client != nil {
+		select {
+		case <-b.client.done:
+			dead = true
+		default:
+		}
+	}
+	return linkStatus{Up: b.attempt == 0 && !dead, Gen: b.gen, Attempt: b.attempt, RetryAt: b.retryAt, Err: b.lastErr}
 }
 
 // Reconnect skips the wait before the next attempt.
@@ -495,6 +594,18 @@ func (b *remoteSessionBackend) supervise(dial func() (*muxClient, error)) {
 				default:
 				}
 				lost = err.Error()
+				if permanentSSHFailure(lost) {
+					// Retrying cannot help and may lock the account: wait
+					// for the person (Reconnect) instead.
+					b.linkMu.Lock()
+					b.lastErr, b.retryAt = lost+" (not retrying; reconnect to try again)", time.Time{}
+					b.linkMu.Unlock()
+					select {
+					case <-b.wake:
+					case <-stopping:
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -549,6 +660,7 @@ func runSSH(host string, promptMe bool) error {
 	}
 	defer backend.Close()
 	setBackend(backend)
+	go backend.HomeDirectory() // cached for the first frame, fetched while the directory below is
 	launchDir, err := backend.WorkingDirectory()
 	if err != nil {
 		return fmt.Errorf("read remote working directory: %w", err)
@@ -575,9 +687,10 @@ func connectOfferingUpdate[B interface{ Close() }](host string, connect func() (
 		}
 		return backend, err
 	}
-	if resp, pingErr := remote(backend).callWithTimeout(remoteRequest{Op: "ping"}, 5*time.Second); pingErr == nil {
-		if order, ok := compareRelease(version, resp.Version); ok && order != 0 {
-			updated, local := offerUpdate(host, resp.Version, order > 0)
+	// The handshake already told us the remote build.
+	if remoteVersion := remote(backend).cur().version; remoteVersion != "" {
+		if order, ok := compareRelease(version, remoteVersion); ok && order != 0 {
+			updated, local := offerUpdate(host, remoteVersion, order > 0)
 			if local {
 				backend.Close()
 				return backend, errUpdatedLocal
@@ -806,4 +919,32 @@ func (e *protocolMismatchError) Error() string {
 		return fmt.Sprintf("the remote lam (protocol %d) is older than this one (%d): update lam on the remote host with `lam update`", e.remote, remoteProtocolVersion)
 	}
 	return fmt.Sprintf("the remote lam (protocol %d) is newer than this one (%d): run `lam update` here", e.remote, remoteProtocolVersion)
+}
+
+// startBuiltinRemoteRPC is startRemoteRPC over the in-process SSH client. An
+// unattended connection never asks anything, so options must not carry
+// prompts then.
+func startBuiltinRemoteRPC(host string, unattended bool, opts SSHOptions) (*muxClient, error) {
+	if unattended && opts.ConnectTimeout <= 0 {
+		opts.ConnectTimeout = 10 * time.Second
+	}
+	stream, err := DialSSH(host, opts)
+	if err != nil {
+		return nil, err
+	}
+	reader := bufio.NewReader(stream)
+	client, err := muxHandshake(pipeRWC{Reader: reader, WriteCloser: stream}, reader, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w%s", err, stream.Stderr.suffix())
+	}
+	return client, nil
+}
+
+// SSHOptionsForCLI is what `lam ssh --builtin` uses: questions on the terminal
+// when attended, none otherwise.
+func SSHOptionsForCLI(unattended bool) SSHOptions {
+	if unattended {
+		return SSHOptions{}
+	}
+	return ConsoleSSHOptions()
 }

@@ -194,6 +194,22 @@ func (nativeBackend) Create(name, cwd, command string) error {
 	return fmt.Errorf("session %q did not start", name)
 }
 
+// OpenAttachStream connects the interface straight to the session's host, as
+// a remote attach does over its connection: no `lam attach` process and no
+// extra pty in between, so every pane costs one socket instead of a process.
+func (nativeBackend) OpenAttachStream(name string, cols, rows int) (io.ReadWriteCloser, error) {
+	conn, err := connectSession(name, 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	// The first frame is the attach request; the host answers with a snapshot.
+	if err := writeFrame(conn, frameResize, resizePayload(max(1, cols), max(1, rows))); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
 // AttachCmd runs `lam attach <name>`, which needs a terminal on stdio.
 func (nativeBackend) AttachCmd(name string) *exec.Cmd {
 	self, err := selfBinary()

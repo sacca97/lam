@@ -104,6 +104,7 @@ func newTermEmu(cols, rows int, cb termCallbacks) (*termEmu, error) {
 		term.Close()
 		return nil, err
 	}
+	enc.SetOptTrackLastCell(true) // motion inside one cell is not reported again
 	e.term, e.enc = term, enc
 	e.setEncoderSize()
 	return e, nil
@@ -578,6 +579,17 @@ func ghMouseButton(b uv.MouseButton) (gh.MouseButton, bool) {
 		return gh.MouseButtonSeven, true
 	}
 	return gh.MouseButtonUnknown, false
+}
+
+// withTerminal runs fn with exclusive use of the libghostty terminal, for a
+// renderer that reads the screen through its own render state, scrolls the
+// viewport or sets the selection. fn is not called once the emulator closed.
+func (e *termEmu) withTerminal(fn func(t *gh.Terminal)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.term != nil {
+		fn(e.term)
+	}
 }
 
 func (e *termEmu) Close() {

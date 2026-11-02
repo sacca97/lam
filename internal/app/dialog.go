@@ -86,16 +86,21 @@ func restoreDialogBody(entries []manifestEntry) []string {
 // settingsOverlay draws the settings box: one row per setting, the chosen
 // row's value highlighted.
 func settingsOverlay(cols, rows int, s uiSettings, row int) string {
-	if cols < 40 || rows < 9 {
+	if cols < 40 || rows < 10 {
 		return ""
 	}
 	placement := "Below"
 	if s.TerminalPlacement == terminalRight {
 		placement = "Right"
 	}
+	notifications := "On"
+	if s.MuteNotifications {
+		notifications = "Off"
+	}
 	items := [][2]string{
 		{"Terminal position", placement},
 		{"Terminal size", fmt.Sprintf("%d%%", s.TerminalPercent)},
+		{"Notify when done", notifications},
 	}
 	const title, hint = " Settings", "↑/↓ choose · ←/→ change · Esc close "
 	boxWidth := min(cols-4, max(ansi.StringWidth(title)+ansi.StringWidth(hint)+6, 50))

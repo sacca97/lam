@@ -175,6 +175,18 @@ func resumeCommand(command string) string {
 			base += " --approve-for-me"
 		}
 		return base
+	case "agy":
+		base := "agy"
+		if strings.Contains(command, "--mode auto") {
+			base += " --mode auto"
+		}
+		if hasQuote {
+			return base + " --continue"
+		}
+		if hasFlag("--continue", "-c", "--conversation") {
+			return command
+		}
+		return base + " --continue"
 	case "pi", "opencode":
 		if hasQuote {
 			return fields[0] + " --continue"

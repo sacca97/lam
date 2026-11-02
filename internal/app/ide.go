@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -116,9 +117,13 @@ type sessionListResult struct {
 
 func startEmbedded(name string, cols, rows int, dirty *dirtyFlag) (*embedded, error) {
 	// Remote sessions are attached over the connection the interface already has.
-	if attacher, ok := backend().(streamAttacher); ok {
+	b, short, err := routeBackend(name)
+	if err != nil {
+		return nil, err
+	}
+	if attacher, ok := b.(streamAttacher); ok {
 		gen := currentLinkStatus().Gen // before attaching: the link may be replaced meanwhile
-		stream, err := attacher.OpenAttachStream(name, cols, rows)
+		stream, err := attacher.OpenAttachStream(short, cols, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -128,11 +133,11 @@ func startEmbedded(name string, cols, rows int, dirty *dirtyFlag) (*embedded, er
 		}
 		return p, err
 	}
-	attacher, ok := backend().(processAttacher)
+	attacher, ok := b.(processAttacher)
 	if !ok {
-		return nil, fmt.Errorf("the %s backend cannot attach sessions", backend().Name())
+		return nil, fmt.Errorf("the %s backend cannot attach sessions", b.Name())
 	}
-	cmd := attacher.AttachCmd(name)
+	cmd := attacher.AttachCmd(short)
 	cmd.Env = append(envWithout("TMUX", "TERM"), "TERM=xterm-256color")
 	return startEmbeddedCommand(name, cmd, false, "", cols, rows, dirty)
 }
@@ -513,8 +518,10 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		}
 		return "\033[?2004l"
 	}
-	fmt.Print("\033[?1049h\033[2J", setOuterBracketedPaste(true))
-	defer fmt.Print("\033[?7h\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
+	// Focus reporting (1004) tells whether the window is in front, so a
+	// session the person is watching does not raise a notification.
+	fmt.Print("\033[?1049h\033[2J\033[?1004h", setOuterBracketedPaste(true))
+	defer fmt.Print("\033[?1004l\033[?7h\033[?2004l\033[?1006l\033[?1002l\033[?1000l\033[?25h\033[?1049l")
 
 	// A hung interface cannot say why. SIGUSR1 writes every goroutine's stack to
 	// the state directory, where the screen being raw and alternate cannot hide it.
@@ -797,6 +804,9 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		return visible[sessionCursor], true
 	}
 	awake := newKeepAwake()
+	finishes := newFinishWatcher()
+	notificationClicks := make(chan string, 4) // sessions whose notification was clicked
+	windowFocused := true                      // until the terminal reports otherwise
 	linkWasUp, linkGen, lastLinkDraw := true, 0, time.Time{}
 	defer awake.Release()
 	pendingNewSession := ""
@@ -837,6 +847,20 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		}
 		lastListError = ""
 		next = filteredManagedShells(next)
+		for _, s := range finishes.update(next, time.Now()) {
+			// The session on screen in a focused window needs no notification.
+			if shown, ok := selectedSession(); settings.MuteNotifications || (windowFocused && ok && shown.Name == s.Name) {
+				continue
+			}
+			title, body := finishNotification(s, shortenHomePath(s.CWD, pathSource), backend().Name())
+			name := s.Name
+			notify(title, body, func() {
+				select {
+				case notificationClicks <- name:
+				default:
+				}
+			})
+		}
 		if remoteMode {
 			// The agents run elsewhere; this machine must stay up to keep the link
 			// (the ticker also holds it while the link is up).
@@ -1263,8 +1287,25 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		dirty.Store(true)
 	}
 
+	// The ticker flushes a lone Escape, drives selection autoscroll and expires
+	// messages. It runs at the frame rate only while the user is active; idle,
+	// a slow tick keeps lam from waking the machine 60 times a second.
+	const idleTick = 250 * time.Millisecond
 	ticker := time.NewTicker(time.Second / uiFrameRate)
 	defer ticker.Stop()
+	tickFast := true
+	var lastInput time.Time
+	setTick := func(fast bool) {
+		if fast == tickFast {
+			return
+		}
+		tickFast = fast
+		if fast {
+			ticker.Reset(time.Second / uiFrameRate)
+		} else {
+			ticker.Reset(idleTick)
+		}
+	}
 	// Frames are drawn as soon as something changes. A short burst may go out
 	// back to back (a key press redraws, and its echo arrives a moment later),
 	// but over time no more than uiFrameRate frames a second are drawn, so a
@@ -2012,22 +2053,25 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		if mode == "settings" {
 			switch key {
 			case "up", "k":
-				settingsRow = 0
+				settingsRow = max(0, settingsRow-1)
 			case "down", "j":
-				settingsRow = 1
+				settingsRow = min(settingsCount-1, settingsRow+1)
 			case "left", "right", "h", "l", "enter", " ", "tab":
 				step := 1
 				if key == "left" || key == "h" {
 					step = -1
 				}
-				if settingsRow == 0 {
+				switch settingsRow {
+				case 0:
 					if settings.TerminalPlacement == terminalRight {
 						settings.TerminalPlacement = terminalBelow
 					} else {
 						settings.TerminalPlacement = terminalRight
 					}
-				} else {
+				case 1:
 					settings.TerminalPercent = cyclePercent(settings.TerminalPercent, step)
+				case 2:
+					settings.MuteNotifications = !settings.MuteNotifications
 				}
 				saveSettings(settings)
 				resizePanes()
@@ -2230,6 +2274,11 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 
 	// handleAction runs the keys that work wherever focus is.
 	handleAction := func(action string) {
+		switch action {
+		case "window-focus", "window-blur":
+			windowFocused = action == "window-focus"
+			return
+		}
 		// Typing in a form or confirming a dialog: the key is not ours to take.
 		if mode != "" && mode != "restore" && mode != "quit-all" && mode != "help" {
 			return
@@ -2683,7 +2732,7 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 							}
 						case code&32 != 0:
 							p.sendMouse(uv.MouseMotionEvent(mouse))
-						case code&3 != 3:
+						case code&3 != 3 && code&128 == 0: // not the back and forward buttons
 							p.sendMouse(uv.MouseClickEvent(mouse))
 							if inTerminal {
 								mouseCaptureTerminal = true
@@ -2765,6 +2814,8 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 				continue
 			}
 			message = "" // any input dismisses the status message
+			lastInput = time.Now()
+			setTick(true)
 			for _, event := range decoder.Feed(data) {
 				if event.mouse != nil {
 					handleMouse(*event.mouse)
@@ -2863,9 +2914,27 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 				dirty.Store(true) // draw repaints the whole screen
 			}
 			tryDraw()
+			setTick(decoder.hasPending() || textSelection.dragging || time.Since(lastInput) < time.Second)
 		case result := <-remoteListUpdates:
 			remoteListInFlight = false
 			applySessionList(result.sessions, result.err)
+		case name := <-notificationClicks:
+			// Open the session whose notification was clicked, unless a form or
+			// dialog is in the way.
+			if mode != "" {
+				break
+			}
+			if !slices.ContainsFunc(visibleSessions(), func(s sessionInfo) bool { return s.Name == name }) {
+				filter = ""
+			}
+			for i, s := range visibleSessions() {
+				if s.Name == name && selectSession(i) {
+					focusSession, terminalFocused = true, false
+					shellInput.reset()
+					break
+				}
+			}
+			tryDraw()
 		}
 	}
 	return nil

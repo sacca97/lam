@@ -25,7 +25,18 @@ type uiSettings struct {
 	TerminalPercent   int      `json:"terminalPercent"`
 	SidebarWidth      int      `json:"sidebarWidth,omitempty"`      // 0 keeps the default
 	CollapsedProjects []string `json:"collapsedProjects,omitempty"` // folders folded in the sidebar
+	MuteNotifications bool     `json:"muteNotifications,omitempty"` // no desktop notification when an agent finishes
+	GUIFontSize       float32  `json:"guiFontSize,omitempty"`       // terminal text size in lam-gui, in sp
+	GUILastHost       string   `json:"guiLastHost,omitempty"`       // the host lam-gui last connected to
+	UI                string   `json:"ui,omitempty"`                // "tui" makes lam ssh use the terminal interface instead of the window
+	TailscaleAutoUp   bool     `json:"tailscaleAutoUp,omitempty"`   // turn Tailscale on without asking before reaching a tailnet host
+	TailnetHosts      []string `json:"tailnetHosts,omitempty"`      // hosts seen as machines of the tailnet
+	GUITheme          string   `json:"guiTheme,omitempty"`          // "dark" (default) or "light"
+	GUISidebarWidth   float32  `json:"guiSidebarWidth,omitempty"`   // lam-gui sidebar width in dp; 0 keeps the default
 }
+
+// settingsCount is the number of rows in the settings box.
+const settingsCount = 3
 
 func settingsPath() string { return filepath.Join(stateDir(), "settings.json") }
 

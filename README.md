@@ -1,6 +1,6 @@
 # LAM — Little Agent Manager
 
-LAM is a terminal session manager for Claude Code, Codex, OpenCode, Pi, and ordinary shell
+LAM is a terminal session manager for Claude Code, Codex, OpenCode, Pi, Antigravity (`agy`), and ordinary shell
 commands. Sessions keep running when you leave the interface, and the session list is shared
 across directories on the same host.
 
@@ -56,8 +56,14 @@ lam start                                # create a shell session and open it
 lam start codex ~/Projects/api           # start Codex in that directory
 lam start claude ../repo --cmd --resume  # pass extra arguments to Claude
 lam start ~/repo --cmd make test         # run a generic command
-lam ssh device2                          # use the UI with sessions on an SSH host
+lam ssh device2                          # open the window with the sessions of an SSH host
+lam ssh device2 --tui                    # the same in this terminal
 ```
+
+`lam ssh` opens the desktop window (`lam-gui`) and gives the terminal back, like `code .`; the
+connection, host-key and password questions are asked in the window. It uses the terminal interface
+instead when `--tui` is given, when `LAM_UI=tui` or `"ui": "tui"` is in the settings file, or when no
+window can open (no `lam-gui` installed, no display, or a plain SSH login).
 
 `lam` opens the shared session list, so you do not need to name or attach to an existing session
 to get back to it. `lam attach <session>` remains available when you want to connect directly to
@@ -89,7 +95,7 @@ In the Sessions view:
 - The new-session choices include `Terminal`, which opens a shell instead of an agent.
 - `t` (or `Alt+T` from any focus) toggles a terminal for the selected session. It starts in that session's working directory and is placed to the right of the session pane (40% of its width) by default. Click either pane or use `Ctrl+Space` to switch focus. Press `s` for settings: the terminal can sit on the right or below the session pane, at 30%, 40% or 50% of the width or height. The choice is saved. On narrow windows the terminal falls back to below.
 - `Ctrl+Space` or `Ctrl+\` switches focus between the sidebar and main pane. When the integrated terminal is open, the shortcuts cycle through the sidebar, session, and terminal. Clicking a pane also focuses it.
-- Sessions survive closing LAM. If their hosts were ended by a reboot, crash or logout, LAM offers to restore them on the next start (`y` restore, `n` discard), reopening each agent in its directory and resuming its last conversation (`claude --continue`, `codex resume --last`, `pi`/`opencode --continue`). This also works over `lam ssh`: the remote host keeps the list and restores on its own side. `lam restore` does the same locally from the command line and `lam restore --list` shows what it would do. Sessions you stop yourself or whose command exits are not offered.
+- Sessions survive closing LAM. If their hosts were ended by a reboot, crash or logout, LAM offers to restore them on the next start (`y` restore, `n` discard), reopening each agent in its directory and resuming its last conversation (`claude --continue`, `codex resume --last`, `pi`/`opencode`/`agy --continue`). This also works over `lam ssh`: the remote host keeps the list and restores on its own side. `lam restore` does the same locally from the command line and `lam restore --list` shows what it would do. Sessions you stop yourself or whose command exits are not offered.
 - `F2` collapses or expands the sidebar. Hold `Shift` while dragging across the integrated terminal to select and copy text.
 - `Ctrl+↑` / `Ctrl+↓` switch to the previous or next session from anywhere. `Ctrl+D` or `q` detaches: LAM closes and every session, including each session's terminal, keeps running. `Ctrl+Q` quits from anywhere and, after confirmation, stops all sessions. Both are intercepted before the focused program sees them.
 - Dragging the edge of the sidebar or of the terminal resizes it, and double-clicking the sidebar edge restores its default width; project headings in the sidebar fold with `←` or `Space`.
@@ -118,6 +124,12 @@ lam attach <session>
 While attached, `Ctrl+Space` or `Ctrl+\` detaches and leaves the session running. A session
 ends when its command exits or you stop it from LAM. A red `●` marks an agent session that has
 finished since you last attached.
+
+When an agent finishes something it worked on for at least 15 seconds, LAM shows a desktop
+notification through the system's own mechanism: Notification Center on macOS (`osascript`),
+`notify-send` (or D-Bus) on Linux, and a Windows toast under WSL. The notification comes from the
+machine running the interface, so sessions on an SSH host notify where you are sitting. The session
+on screen in a focused window does not notify. Turn notifications off in settings (`s`).
 
 ## Updating and releases
 

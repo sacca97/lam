@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,22 +125,24 @@ func (c *hostClient) writeLoop() {
 }
 
 type hostSession struct {
-	awake    *keepAwake
-	meter    outputMeter
-	snapMu   sync.Mutex // guards snap and snapAt
-	snap     sessionActivitySnapshot
-	snapAt   time.Time
-	cpu      cpuSampler
-	name     string
-	meta     sessionMeta
-	renameMu sync.Mutex
-	closing  bool
-	ptmx     *os.File
-	inMu     sync.Mutex // guards inBuf and inWake
-	inBuf    []byte
-	inWake   bool
-	cmd      *exec.Cmd
-	ln       net.Listener
+	awake *keepAwake
+	meter outputMeter
+	// resizeUntil is when the redraw a resize causes is over (unix nanoseconds).
+	resizeUntil atomic.Int64
+	snapMu      sync.Mutex // guards snap and snapAt
+	snap        sessionActivitySnapshot
+	snapAt      time.Time
+	cpu         cpuSampler
+	name        string
+	meta        sessionMeta
+	renameMu    sync.Mutex
+	closing     bool
+	ptmx        *os.File
+	inMu        sync.Mutex // guards inBuf and inWake
+	inBuf       []byte
+	inWake      bool
+	cmd         *exec.Cmd
+	ln          net.Listener
 
 	// mu guards the emulator, the pty size and the client set. Pty output is
 	// written to the emulator and broadcast under it, so a client's snapshot
@@ -201,6 +204,12 @@ func newHostTerminal(cols, rows int, writePty func([]byte)) (*gh.Terminal, error
 
 // runHost is the body of `lam host`. It blocks until the session ends.
 func runHost(name, cwd, command string) error {
+	// A host is a short pipeline (pty, emulator, a few clients). On a many-core
+	// machine the default of one P per core only adds idle threads hunting for
+	// work during a flood; two keep it as fast with less CPU and memory.
+	if os.Getenv("GOMAXPROCS") == "" {
+		runtime.GOMAXPROCS(2)
+	}
 	if err := validSessionName(name); err != nil {
 		return err
 	}
@@ -362,8 +371,10 @@ func (h *hostSession) readPty() {
 func (h *hostSession) output(data []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.lastOutputAt.Store(time.Now().UnixNano())
-	if h.meter.add(len(data), time.Now()) >= activityOutputBytes {
+	now := time.Now()
+	h.lastOutputAt.Store(now.UnixNano())
+	// The redraw a program makes after a resize is not work.
+	if now.UnixNano() >= h.resizeUntil.Load() && h.meter.add(len(data), now) >= activityOutputBytes {
 		h.awake.Touch()
 	}
 	h.term.VTWrite(data)
@@ -618,6 +629,9 @@ func (h *hostSession) attach(conn net.Conn, resize []byte) {
 
 // resizeLocked resizes the pty and the emulator. h.mu must be held.
 func (h *hostSession) resizeLocked(cols, rows int) {
+	if cols != h.cols || rows != h.rows {
+		h.resizeUntil.Store(time.Now().Add(resizeRedrawQuiet).UnixNano())
+	}
 	h.cols, h.rows = cols, rows
 	h.term.Resize(uint16(cols), uint16(rows), 8, 16)
 	pty.Setsize(h.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
@@ -737,6 +751,7 @@ func (h *hostSession) computeActivity(now time.Time) sessionActivitySnapshot {
 		RecentBytes:  h.meter.recent(now),
 		IdlePrompt:   idle,
 		CPUBusy:      h.cpu.Busy(now),
+		Agent:        isAgentCommand(meta.Command),
 		AgentStatus:  agentStatus(name, meta.Command, meta.Created),
 	})
 	return snapshot

@@ -416,6 +416,7 @@ type muxClient struct {
 	w       *muxWriter
 	r       io.Reader
 	cleanup func() // extra teardown, such as stopping the ssh process
+	version string // the remote lam's build, from the handshake
 
 	mu        sync.Mutex
 	nextID    uint64

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,11 +16,21 @@ const (
 	// A session counts as producing output only when it printed at least this
 	// much within the meter window: a prompt clock or a blinking cursor stays
 	// well below it while a spinner or streamed text is far above.
-	activityOutputBytes  = 512
-	activityMeterWindow  = 10
-	activityCPUInterval  = 2 * time.Second
-	activityCPUThreshold = 0.03 // share of one core, over the interval
-	clockTicksPerSecond  = 100
+	activityOutputBytes = 512
+	activityMeterWindow = 10
+	// What an agent that is computing must also have printed in the window: a
+	// spinner or a stream of text, far less than the 512 bytes that count alone.
+	activityCPUOutputBytes = 64
+	activityCPUInterval    = 2 * time.Second
+	// A share of one core over the interval. Idle agents do background work of
+	// their own (an opencode tick used about 9% of a core for two seconds every
+	// minute), which must not look like work; builds and agents thinking use
+	// far more.
+	activityCPUThreshold = 0.15
+	activityCPUStreak    = 2 // consecutive busy samples before CPU counts
+	// Output within this long after a resize is the program redrawing.
+	resizeRedrawQuiet   = 1500 * time.Millisecond
+	clockTicksPerSecond = 100
 )
 
 // activitySignals is everything the host can cheaply tell about a session.
@@ -29,18 +40,24 @@ type activitySignals struct {
 	RecentBytes  int    // output within the meter window
 	IdlePrompt   bool   // a shell with nothing running in it
 	CPUBusy      bool   // the process tree is computing
+	Agent        bool   // a coding agent, as opposed to a shell or another program
 	AgentStatus  string // what an agent reported about itself, if anything
 }
 
 // classifyActivity folds the signals into "active", "quiet" or "" (unknown).
 //
 //   - Work that burns CPU is active even if it prints nothing, such as a build
-//     or a loop inside the shell itself.
+//     or a loop inside the shell itself. An agent's CPU counts only with output.
 //   - A shell sitting at its prompt is quiet however much its prompt redraws.
 //   - An agent that reports it is waiting or idle is quiet unless work runs.
 //   - Otherwise sustained output means active; a trickle does not.
 func classifyActivity(s activitySignals) string {
-	if s.CPUBusy {
+	// Agents run helper processes that several sessions share (a server one
+	// session started, language servers, MCP servers): their CPU says nothing
+	// about which session is working. What a session prints is its own, so for
+	// an agent CPU only counts together with some output; a shell's children
+	// are its own and CPU alone is enough.
+	if s.CPUBusy && (!s.Agent || s.RecentBytes >= activityCPUOutputBytes) {
 		return "active"
 	}
 	if s.IdlePrompt {
@@ -105,6 +122,7 @@ type cpuSampler struct {
 	at    time.Time
 	ticks int64
 	busy  bool
+	run   int // consecutive samples over the threshold
 }
 
 func (c *cpuSampler) Busy(now time.Time) bool {
@@ -119,7 +137,7 @@ func (c *cpuSampler) Busy(now time.Time) bool {
 	if now.Sub(c.at) > 3*activityCPUInterval {
 		// Too long since the last look: an average over the gap would hide a
 		// burst or invent one. Start over and answer from the next sample.
-		c.at, c.busy = time.Time{}, false
+		c.at, c.busy, c.run = time.Time{}, false, 0
 	}
 	ticks, ok := processTreeTicks(c.pid)
 	if !ok {
@@ -128,7 +146,12 @@ func (c *cpuSampler) Busy(now time.Time) bool {
 	}
 	if !c.at.IsZero() {
 		elapsed := now.Sub(c.at).Seconds()
-		c.busy = float64(ticks-c.ticks) > activityCPUThreshold*elapsed*clockTicksPerSecond
+		if float64(ticks-c.ticks) > activityCPUThreshold*elapsed*clockTicksPerSecond {
+			c.run++
+		} else {
+			c.run = 0
+		}
+		c.busy = c.run >= activityCPUStreak
 	}
 	c.at, c.ticks = now, ticks
 	return c.busy
@@ -198,15 +221,24 @@ func procStatTicks(pid int) (int64, bool) {
 	return sum, true
 }
 
+// procChildren lists the children of pid. A child is listed under the thread
+// that forked it, so every thread's list is read.
 func procChildren(pid int) ([]int, error) {
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "task", strconv.Itoa(pid), "children"))
+	dir := filepath.Join("/proc", strconv.Itoa(pid), "task")
+	tasks, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
 	var out []int
-	for _, field := range strings.Fields(string(data)) {
-		if n, err := strconv.Atoi(field); err == nil {
-			out = append(out, n)
+	for _, task := range tasks {
+		data, err := os.ReadFile(filepath.Join(dir, task.Name(), "children"))
+		if err != nil {
+			continue
+		}
+		for _, field := range strings.Fields(string(data)) {
+			if n, err := strconv.Atoi(field); err == nil {
+				out = append(out, n)
+			}
 		}
 	}
 	return out, nil
@@ -228,4 +260,9 @@ func agentStatus(name, command string, created time.Time) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// isAgentCommand says whether a session runs one of the coding agents lam knows.
+func isAgentCommand(command string) bool {
+	return slices.Contains(supportedLaunchers, commandName(command))
 }

@@ -22,6 +22,7 @@ type sessionInfo struct {
 	Shell    bool      `json:"shell,omitempty"`
 	Created  time.Time `json:"created,omitempty"`
 	Clients  int       `json:"clients,omitempty"`
+	Host     string    `json:"-"` // the remote machine it runs on; empty for this one
 }
 
 // SessionBackend is the process-persistence layer LAM sits on. The native
