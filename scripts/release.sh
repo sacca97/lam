@@ -68,7 +68,7 @@ if [ "$(go env GOOS)/$(go env GOARCH)" = linux/amd64 ]; then
         head -c 24 /dev/urandom | base64 | tr -d '/+=' > "$keystore.pass"
         chmod 600 "$keystore.pass"
         "${JAVA_HOME:-/opt/android-studio/jbr}/bin/keytool" -genkeypair -keystore "$keystore" -alias lam \
-            -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=lam" \
+            -keyalg EC -groupname secp256r1 -sigalg SHA256withECDSA -validity 36500 -dname "CN=lam" \
             -storepass "$(cat "$keystore.pass")" -keypass "$(cat "$keystore.pass")"
         chmod 600 "$keystore"
         echo "made the Android signing key $keystore (password in $keystore.pass): back both up" >&2
