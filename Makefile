@@ -10,13 +10,14 @@ LDFLAGS := -s -w -X $(MODULE)/internal/app.version=$(VERSION)
 LIBGHOSTTY ?= $(HOME)/.cache/lam/libghostty
 export PKG_CONFIG_PATH := $(LIBGHOSTTY)/share/pkgconfig:$(PKG_CONFIG_PATH)
 
-# The GUI build (lam-gui) links Gio's Wayland and X11 backends. Without the
+# The build with the window (written to lam-gui, installed as lam) links Gio's Wayland and X11 backends. Without the
 # xkbcommon-x11 development files it is built for Wayland only.
 GUI_BINARY := lam-gui
 GUI_TAGS   ?= gui$(shell pkg-config --exists xkbcommon-x11 2>/dev/null || echo ,nox11)
 DESKTOP_DIR ?= $(HOME)/.local/share/applications
 ICON_DIR    ?= $(HOME)/.local/share/icons
 ICON_SIZES  := 16 32 48 64 128 256 512
+SIGN_APP    ?= 1
 APP_DIR     ?= $(HOME)/Applications
 APP_BUNDLE  := $(APP_DIR)/lam.app
 
@@ -35,27 +36,32 @@ build: deps ## Build the lam executable
 gui: deps ## Build lam-gui, lam with the experimental Gio GUI (needs wayland/egl dev packages)
 	CGO_ENABLED=1 go build -tags '$(GUI_TAGS)' -trimpath -ldflags '$(LDFLAGS)' -o $(GUI_BINARY) ./cmd/lam
 
-install: build ## Install lam (and lam-gui when it builds) to $(BINDIR), restart the daemon if installed
-	install -d "$(BINDIR)"
-	install -m 755 "$(BINARY)" "$(BINDIR)/$(BINARY)"
-	@echo "installed $(BINDIR)/$(BINARY)"
-	@if $(MAKE) --no-print-directory gui >/dev/null 2>&1; then \
-		install -m 755 "$(GUI_BINARY)" "$(BINDIR)/$(GUI_BINARY)"; \
-		echo "installed $(BINDIR)/$(GUI_BINARY) ($(GUI_TAGS))"; \
-		if [ "$$(uname -s)" = Linux ]; then \
-			install -d "$(DESKTOP_DIR)"; \
-			printf '[Desktop Entry]\nType=Application\nName=lam\nComment=Agent sessions\nExec=%s\nIcon=lam\nTerminal=false\nCategories=Development;\n' \
-				"$(BINDIR)/$(GUI_BINARY)" > "$(DESKTOP_DIR)/lam.desktop"; \
-			for s in $(ICON_SIZES); do \
-				install -d "$(ICON_DIR)/hicolor/$${s}x$${s}/apps"; \
-				install -m 644 assets/icon/png/lam-$$s.png "$(ICON_DIR)/hicolor/$${s}x$${s}/apps/lam.png"; \
-			done; \
-			gtk-update-icon-cache -q -t "$(ICON_DIR)/hicolor" 2>/dev/null || true; \
-		fi; \
-		if [ "$$(uname -s)" = Darwin ]; then $(MAKE) --no-print-directory macapp; fi; \
+install: ## Install lam: lam.app and a lam command pointing into it on macOS; lam with its window on Linux (terminal-only if that does not build)
+	@set -e; \
+	install -d "$(BINDIR)"; \
+	if [ "$$(uname -s)" = Darwin ]; then \
+		$(MAKE) --no-print-directory gui; \
+		$(MAKE) --no-print-directory macapp; \
+		rm -f "$(BINDIR)/$(BINARY)"; \
+		ln -s "$(APP_BUNDLE)/Contents/MacOS/lam" "$(BINDIR)/$(BINARY)"; \
+		echo "installed $(BINDIR)/$(BINARY) -> $(APP_BUNDLE)/Contents/MacOS/lam"; \
+	elif $(MAKE) --no-print-directory gui >/dev/null 2>&1; then \
+		install -m 755 "$(GUI_BINARY)" "$(BINDIR)/$(BINARY)"; \
+		echo "installed $(BINDIR)/$(BINARY) ($(GUI_TAGS))"; \
+		install -d "$(DESKTOP_DIR)"; \
+		printf '[Desktop Entry]\nType=Application\nName=lam\nComment=Agent sessions\nExec=%s gui\nIcon=lam\nTerminal=false\nCategories=Development;\n' \
+			"$(BINDIR)/$(BINARY)" > "$(DESKTOP_DIR)/lam.desktop"; \
+		for s in $(ICON_SIZES); do \
+			install -d "$(ICON_DIR)/hicolor/$${s}x$${s}/apps"; \
+			install -m 644 assets/icon/png/lam-$$s.png "$(ICON_DIR)/hicolor/$${s}x$${s}/apps/lam.png"; \
+		done; \
+		gtk-update-icon-cache -q -t "$(ICON_DIR)/hicolor" 2>/dev/null || true; \
 	else \
-		echo "lam-gui not built (run 'make gui' to see why); lam is installed"; \
-	fi
+		$(MAKE) --no-print-directory build; \
+		install -m 755 "$(BINARY)" "$(BINDIR)/$(BINARY)"; \
+		echo "installed $(BINDIR)/$(BINARY) without the window (run 'make gui' to see why it did not build)"; \
+	fi; \
+	rm -f "$(BINDIR)/$(GUI_BINARY)"
 	@# Only refresh the service that runs this install: an install elsewhere
 	@# (another PREFIX) must not repoint it.
 	@if grep -qF "$(BINDIR)/$(BINARY) daemon" $(HOME)/.config/systemd/user/lam-daemon.service 2>/dev/null; then \
@@ -63,18 +69,21 @@ install: build ## Install lam (and lam-gui when it builds) to $(BINDIR), restart
 	fi
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) echo "warning: $(BINDIR) is not in PATH";; esac
 
-# macapp makes lam.app so Launchpad and Spotlight find the GUI. The bundle's
-# launcher starts lam-gui from a login shell: an app opened from Finder does
-# not get the PATH the agents (claude, codex...) are installed under.
+# macapp makes lam.app so Launchpad and Spotlight find the window. Its
+# executable is lam itself, which takes the login shell's environment when
+# started from Finder (see login_env.go).
 macapp:
 	rm -rf "$(APP_BUNDLE)"
 	install -d "$(APP_BUNDLE)/Contents/MacOS"
-	install -m 755 "$(GUI_BINARY)" "$(APP_BUNDLE)/Contents/MacOS/lam-gui"
+	install -m 755 "$(GUI_BINARY)" "$(APP_BUNDLE)/Contents/MacOS/lam"
 	install -d "$(APP_BUNDLE)/Contents/Resources"
 	install -m 644 assets/icon/lam.icns "$(APP_BUNDLE)/Contents/Resources/lam.icns"
-	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>CFBundleName</key><string>lam</string>\n<key>CFBundleIdentifier</key><string>io.github.sacca97.lam</string>\n<key>CFBundleExecutable</key><string>lam-gui</string>\n<key>CFBundleIconFile</key><string>lam</string>\n<key>CFBundlePackageType</key><string>APPL</string>\n<key>CFBundleVersion</key><string>1</string>\n<key>CFBundleShortVersionString</key><string>$(patsubst v%,%,$(VERSION))</string>\n<key>LSMinimumSystemVersion</key><string>11.0</string>\n<key>NSHighResolutionCapable</key><true/>\n<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>\n</dict></plist>\n' > "$(APP_BUNDLE)/Contents/Info.plist"
-	@# Notifications need the bundle to be signed; an ad-hoc signature does.
-	@if command -v codesign >/dev/null 2>&1; then codesign --force --deep -s - "$(APP_BUNDLE)" >/dev/null 2>&1 || echo "warning: could not sign $(APP_BUNDLE); notifications may not show"; fi
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>CFBundleName</key><string>lam</string>\n<key>CFBundleIdentifier</key><string>io.github.sacca97.lam</string>\n<key>CFBundleExecutable</key><string>lam</string>\n<key>CFBundleIconFile</key><string>lam</string>\n<key>CFBundlePackageType</key><string>APPL</string>\n<key>CFBundleVersion</key><string>1</string>\n<key>CFBundleShortVersionString</key><string>$(patsubst v%,%,$(VERSION))</string>\n<key>LSMinimumSystemVersion</key><string>11.0</string>\n<key>NSHighResolutionCapable</key><true/>\n<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>\n</dict></plist>\n' > "$(APP_BUNDLE)/Contents/Info.plist"
+	@# Notifications need the bundle to be signed; an ad-hoc signature does. A
+	@# cross-build (SIGN_APP=0) is signed afterwards by scripts/cross-darwin-gui.sh.
+	@if [ "$(SIGN_APP)" = 0 ]; then :; elif command -v codesign >/dev/null 2>&1; then \
+		codesign --force --deep -s - "$(APP_BUNDLE)" && echo "signed $(APP_BUNDLE) (ad hoc)" || echo "warning: could not sign $(APP_BUNDLE); notifications will not show"; \
+	else echo "warning: codesign not found; $(APP_BUNDLE) is unsigned and notifications will not show"; fi
 	@echo "installed $(APP_BUNDLE)"
 
 cross-mac-gui: ## Build lam.app for macOS arm64 from Linux: make cross-mac-gui MACOS_SDK=/path/to/MacOSX.sdk

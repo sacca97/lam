@@ -120,6 +120,7 @@ func moveArea(gtx layout.Context, r image.Rectangle) {
 }
 
 func (g *guiApp) layoutSidebar(gtx layout.Context) {
+	g.moreShown, g.moreNext = g.moreNext, "" // the row whose dots were shown last frame
 	size := gtx.Constraints.Max
 	paint.FillShape(gtx.Ops, g.th.Sidebar, clip.Rect{Max: size}.Op())
 	pad := gtx.Dp(g.th.Pad)
@@ -371,6 +372,11 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 	selected := s.Name == g.selected
 	hovered := click.Hovered()
 	menuOpen := g.menu != nil && g.menu.s.Name == s.Name
+	// The dots sit on top of the row, so the pointer over them is no longer over
+	// the row. They stay shown while they were shown last frame, which is what
+	// lets them take the pointer and see it enter and leave; they go once they
+	// are neither over a hovered row nor hovered themselves.
+	showMore := hovered || menuOpen || g.moreShown == s.Name
 	dims := click.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		rr := clip.UniformRRect(inner, gtx.Dp(g.th.ItemRadius))
 		switch {
@@ -391,13 +397,16 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 	right := inner.Max.X - gtx.Dp(10)
 
 	status, scol, age := g.statusOf(s, now)
-	if hovered || menuOpen {
+	if showMore {
 		mr := image.Rect(right-gtx.Dp(26), cy-gtx.Dp(12), right+gtx.Dp(2), cy+gtx.Dp(12))
 		if g.ghostButton(gtx, "more-"+s.Name, mr, "", false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 			iconMore(gtx, c, float32(gtx.Dp(4.5)), col)
 		}) {
 			g.selectSession(s.Name)
 			g.menu = &rowMenu{s: s, at: g.lastPress}
+		}
+		if hovered || menuOpen || g.clickable("more-"+s.Name).Hovered() {
+			g.moreNext = s.Name
 		}
 		right = mr.Min.X - gtx.Dp(4)
 	} else if age != "" && status != "" {
@@ -468,8 +477,12 @@ func (g *guiApp) layoutSection(gtx layout.Context, r guiRow, pad int) layout.Dim
 	w := gtx.Constraints.Max.X
 	gap := 0
 	if r.host != "" {
-		gap = gtx.Dp(14) // air and a rule between the two machines
-		paint.FillShape(gtx.Ops, g.th.Divider, clip.Rect{Min: image.Pt(0, gap/2), Max: image.Pt(w, gap/2+max(1, gtx.Dp(1)))}.Op())
+		// The break between two machines is heavier than the one between two
+		// projects: more air, and a thicker rule across the whole sidebar in the
+		// border colour.
+		gap = gtx.Dp(20)
+		rule := max(2, gtx.Dp(2))
+		paint.FillShape(gtx.Ops, g.th.Border, clip.Rect{Min: image.Pt(0, gap/2-rule/2), Max: image.Pt(w, gap/2-rule/2+rule)}.Op())
 	}
 	h := gtx.Dp(30)
 	band := image.Rect(pad-gtx.Dp(2), gap, w-pad+gtx.Dp(2), gap+h)

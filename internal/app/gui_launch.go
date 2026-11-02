@@ -60,11 +60,19 @@ func haveDisplay() bool {
 // given back at once and closing it does not close the window. It reports
 // false, having started nothing, when no window can be shown here.
 func launchGUI(args ...string) bool {
-	exe := guiExecutable()
-	if exe == "" || !haveDisplay() {
+	if !haveDisplay() {
 		return false
 	}
-	cmd := exec.Command(exe, args...)
+	var cmd *exec.Cmd
+	if bundle := macAppBundle(); bundle != "" {
+		// Through the app bundle, so macOS knows it as lam (icon, notifications)
+		// and not as a bare executable called lam-gui.
+		cmd = exec.Command("/usr/bin/open", macOpenArgs(bundle, args)...)
+	} else if exe := guiExecutable(); exe != "" {
+		cmd = exec.Command(exe, args...)
+	} else {
+		return false
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -72,4 +80,37 @@ func launchGUI(args ...string) bool {
 	}
 	_ = cmd.Process.Release()
 	return true
+}
+
+// macAppBundle is the lam.app that shows the window on macOS: the one this
+// program runs from, or an installed one; "" elsewhere.
+func macAppBundle() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	if exe, err := os.Executable(); err == nil {
+		if i := strings.Index(exe, ".app/Contents/MacOS/"); i >= 0 {
+			return exe[:i+len(".app")]
+		}
+	}
+	candidates := []string{"/Applications/lam.app"}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append([]string{filepath.Join(home, "Applications", "lam.app")}, candidates...)
+	}
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// macOpenArgs is the open(1) command line that starts a new instance of the
+// app with the window's arguments ("gui" is the subcommand name; the app's own
+// executable takes what follows it).
+func macOpenArgs(bundle string, args []string) []string {
+	if len(args) > 0 && args[0] == "gui" {
+		args = args[1:]
+	}
+	return append([]string{"-n", "-a", bundle, "--args"}, args...)
 }

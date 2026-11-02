@@ -43,11 +43,16 @@ int lamNotifyInit(void) {
 		lamDelegate = [LamNotifyDelegate new];
 		center.delegate = lamDelegate;
 		[center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
-		                      completionHandler:^(BOOL granted, NSError *error) {}];
+		                      completionHandler:^(BOOL granted, NSError *error) {
+			NSString *line = [NSString stringWithFormat:@"authorization granted=%d error=%@", granted, error ? error.localizedDescription : @"none"];
+			lamNotifyLog((char *)line.UTF8String);
+		}];
 		return 1;
 	} @catch (NSException *e) {
 		lamDelegate = nil;
-		return 0;
+		NSString *line = [NSString stringWithFormat:@"notification centre unavailable: %@ %@", e.name, e.reason];
+		lamNotifyLog((char *)line.UTF8String);
+		return -1;
 	}
 }
 
@@ -61,7 +66,12 @@ int lamNotifySend(const char *title, const char *body, const char *ident) {
 		UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:[NSString stringWithUTF8String:ident]
 		                                                                      content:content
 		                                                                      trigger:nil];
-		[[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:nil];
+		[[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:^(NSError *error) {
+			if (error) {
+				NSString *line = [NSString stringWithFormat:@"could not show a notification: %@", error.localizedDescription];
+				lamNotifyLog((char *)line.UTF8String);
+			}
+		}];
 		return 1;
 	} @catch (NSException *e) {
 		return 0;

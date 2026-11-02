@@ -23,7 +23,7 @@ mkdir -p "$OUT"
 GO_TAGS=gui scripts/cross-darwin.sh "$OUT/lam-gui-darwin-arm64"
 
 rm -rf "$OUT/Applications"
-make --no-print-directory macapp APP_DIR="$OUT/Applications" GUI_BINARY="$OUT/lam-gui-darwin-arm64"
+make --no-print-directory macapp SIGN_APP=0 APP_DIR="$OUT/Applications" GUI_BINARY="$OUT/lam-gui-darwin-arm64"
 # Notifications need a signed app. An ad-hoc signature (no identity) is enough;
 # rcodesign makes one from Linux: cargo install apple-codesign
 if command -v rcodesign >/dev/null 2>&1; then

@@ -34,3 +34,16 @@ func TestLaunchGUIDoesNothingWithoutADisplay(t *testing.T) {
 		t.Fatal("a window must not be started on a machine with no display")
 	}
 }
+
+func TestMacOpenArgsStartsAnInstanceOfTheApp(t *testing.T) {
+	got := macOpenArgs("/Users/x/Applications/lam.app", []string{"gui", "ssh", "box"})
+	want := []string{"-n", "-a", "/Users/x/Applications/lam.app", "--args", "ssh", "box"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}

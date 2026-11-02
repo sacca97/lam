@@ -61,19 +61,20 @@ const (
 )
 
 type guiApp struct {
-	th          guiTheme
-	win         *app.Window
-	dirty       *dirtyFlag
-	shaper      *text.Shaper
-	fb          *fallbackFonts
-	settings    uiSettings
-	launchDir   string
-	localHost   string // cached name of this machine
-	autoConnect string // a host to connect to once the window is up (lam ssh HOST)
-	pathSource  sessionDirectorySource
-	remote      bool
-	mb          *multiBackend // this machine's sessions and the connected host's
-	restorer    sessionRestorer
+	th                  guiTheme
+	win                 *app.Window
+	dirty               *dirtyFlag
+	shaper              *text.Shaper
+	fb                  *fallbackFonts
+	settings            uiSettings
+	launchDir           string
+	localHost           string // cached name of this machine
+	autoConnect         string // a host to connect to once the window is up (lam ssh HOST)
+	moreShown, moreNext string // the session whose three dots are shown, last frame and this one
+	pathSource          sessionDirectorySource
+	remote              bool
+	mb                  *multiBackend // this machine's sessions and the connected host's
+	restorer            sessionRestorer
 
 	// Shared with the list refresher and notification callbacks.
 	mu            sync.Mutex

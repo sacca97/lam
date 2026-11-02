@@ -6,6 +6,10 @@ import (
 	"image/png"
 	"os"
 	"testing"
+	"time"
+
+	"gioui.org/f32"
+	"gioui.org/io/pointer"
 )
 
 // The window lists this machine's sessions and the connected host's under
@@ -56,4 +60,40 @@ func sortedCopy(list []sessionInfo) []sessionInfo {
 		}
 	}
 	return out
+}
+
+// The three dots on a session row show while the pointer is over the row and
+// must stay when the pointer moves onto them, where they take the hover from the
+// row: a click on them opens the session's menu.
+func TestGUIRowMenuButtonStaysUnderThePointer(t *testing.T) {
+	e := testPane(t, 80, 24)
+	g := newTestApp(t, e)
+	d := &guiDriver{t: t, g: g}
+	d.frame()
+	d.frame()
+	at := time.Duration(0)
+	// A pointer arriving: the first move places it, the second enters what is there.
+	move := func(x, y float32) {
+		for i := 0; i < 2; i++ {
+			at += time.Millisecond
+			d.router.Queue(pointer.Event{Kind: pointer.Move, Source: pointer.Mouse, Position: f32.Pt(x, y), Time: at})
+			d.frame()
+		}
+		d.frame()
+	}
+	move(100, 292) // over the selected row: the dots appear
+	move(236, 292) // onto the dots
+	move(237, 293) // and a little more, as a hand does
+	dots := g.clickable("more-claude-lam")
+	if !dots.Hovered() {
+		t.Fatal("the dots did not get the pointer")
+	}
+	p := f32.Pt(237, 293)
+	d.router.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p, Time: at + time.Millisecond},
+		pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: at + 2*time.Millisecond})
+	d.frame()
+	d.frame()
+	if g.menu == nil {
+		t.Fatal("clicking the three dots did not open the menu")
+	}
 }

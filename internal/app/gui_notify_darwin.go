@@ -35,8 +35,17 @@ func init() { notifyNative = nativeNotify }
 
 // startNativeNotifications is run once the window exists.
 func startNativeNotifications() {
-	notifyOnce.Do(func() { notifyReady.Store(C.lamNotifyInit() == 1) })
+	notifyOnce.Do(func() {
+		status := C.lamNotifyInit()
+		notifyReady.Store(status == 1)
+		if status != 1 {
+			logEvent("notifications: native centre not started (status %d); using osascript, whose clicks cannot reach lam", int(status))
+		}
+	})
 }
+
+//export lamNotifyLog
+func lamNotifyLog(line *C.char) { logEvent("notifications: %s", C.GoString(line)) }
 
 //export lamNotificationClicked
 func lamNotificationClicked(ident *C.char) {

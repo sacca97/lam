@@ -175,6 +175,12 @@ func updateCmd(args []string) error {
 			return errors.New("usage: lam update [--check] [version]")
 		}
 	}
+	if guiBuilt && !check {
+		// The release asset for this platform is the terminal-only build:
+		// installing it would take the window away.
+		return errors.New("this lam includes the window, which lam update would replace with the terminal-only build; " +
+			"reinstall instead (make install, or lam-app-darwin-arm64.tar.gz / lam-gui-linux-amd64 from the release)")
+	}
 	r, err := fetchRelease(tag)
 	if err != nil {
 		return err

@@ -60,10 +60,14 @@ lam ssh device2                          # open the window with the sessions of 
 lam ssh device2 --tui                    # the same in this terminal
 ```
 
-`lam ssh` opens the desktop window (`lam-gui`) and gives the terminal back, like `code .`; the
-connection, host-key and password questions are asked in the window. It uses the terminal interface
+`lam` and `lam ssh` open the desktop window and give the terminal back, like `code .`; the
+connection, host-key and password questions are asked in the window. They use the terminal interface
 instead when `--tui` is given, when `LAM_UI=tui` or `"ui": "tui"` is in the settings file, or when no
-window can open (no `lam-gui` installed, no display, or a plain SSH login).
+window can open (a terminal-only build, no display, or a plain SSH login).
+
+`make install` puts one command, `lam`, on your PATH. On Linux it has the window built in when the
+Wayland/EGL development files are there (otherwise it is terminal-only); on macOS it installs
+`~/Applications/lam.app`, signed ad hoc, and `~/.local/bin/lam` points into it.
 
 `lam` opens the shared session list, so you do not need to name or attach to an existing session
 to get back to it. `lam attach <session>` remains available when you want to connect directly to

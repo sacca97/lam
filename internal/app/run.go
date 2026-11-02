@@ -16,7 +16,7 @@ func Run() {
 	// Started as lam-gui (the GUI build's name, as a desktop launcher runs it):
 	// open the window. With arguments it is an ordinary lam, so session hosts
 	// it spawns from its own executable keep working.
-	if strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") == "lam-gui" && (len(os.Args) == 1 || os.Args[1] == "ssh") {
+	if (strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") == "lam-gui" && (len(os.Args) == 1 || os.Args[1] == "ssh")) || launchedAsApp() {
 		guiCmd(os.Args[1:]) // lam-gui, or lam-gui ssh HOST
 		return
 	}
@@ -132,7 +132,7 @@ func Run() {
 	}
 
 	// Flags
-	promptMe := false
+	promptMe, tui := false, false
 	startDir := ""
 	for _, arg := range os.Args[1:] {
 		if !strings.HasPrefix(arg, "-") && startDir == "" {
@@ -147,6 +147,9 @@ func Run() {
 		if arg == "--prompt-me" {
 			promptMe = true
 		}
+		if arg == "--tui" {
+			tui = true
+		}
 		if arg == "--version" || arg == "-v" {
 			fmt.Println("lam", version)
 			return
@@ -157,11 +160,18 @@ func Run() {
 		}
 	}
 
+	// The window is the default: it opens detached and the terminal is free
+	// again. --tui, LAM_UI=tui, a "ui": "tui" setting, a folder argument or
+	// --prompt-me (which the window has no use for) keep the terminal interface,
+	// as does a machine where no window can open.
+	if !tui && !promptMe && startDir == "" && preferGUI() && launchGUI("gui") {
+		return
+	}
 	runIDE(promptMe, startDir)
 }
 
 func printHelp() {
-	fmt.Println("Usage: lam [dir] [flags]")
+	fmt.Println("Usage: lam [dir] [flags]   (opens the window; lam --tui for the terminal interface)")
 	fmt.Println()
 	fmt.Println("Arguments:")
 	fmt.Println("  dir                 Folder new sessions open in (default: current directory)")
@@ -180,10 +190,13 @@ func printHelp() {
 	fmt.Println("  tail <session> [-f] Print session scrollback and screen as plain text")
 	fmt.Println("  send <session> <text>  Type text into a session and press Enter")
 	fmt.Println("  restore [--list]    Reopen sessions that ended with a reboot or crash, resuming their agents")
-	fmt.Println("  ssh <host>          Open this UI for sessions on an SSH host")
+	fmt.Println("  gui                 Open the window and stay attached to this terminal")
+	fmt.Println("  ssh <host>          Open the window for sessions on an SSH host")
+	fmt.Println("                      --tui uses the terminal interface instead")
 	fmt.Println("                      --builtin uses the built-in SSH client (or LAM_SSH=builtin)")
 	fmt.Println()
 	fmt.Println("Flags:")
+	fmt.Println("  --tui               Use the terminal interface instead of the window")
 	fmt.Println("  --prompt-me         Ask for a starting prompt when creating sessions")
 	fmt.Println("  --version           Print version and exit")
 }
