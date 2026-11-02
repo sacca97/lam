@@ -13,6 +13,10 @@ var version = "dev"
 // Run executes the LAM command line interface.
 func Run() {
 	enterLoginEnvironment()
+	// lam-tui is lam with the terminal interface as its default.
+	if strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") == "lam-tui" {
+		os.Setenv("LAM_UI", "tui")
+	}
 	// Started as lam-gui (the GUI build's name, as a desktop launcher runs it):
 	// open the window. With arguments it is an ordinary lam, so session hosts
 	// it spawns from its own executable keep working.

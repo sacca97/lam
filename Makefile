@@ -61,7 +61,8 @@ install: ## Install lam: lam.app and a lam command pointing into it on macOS; la
 		install -m 755 "$(BINARY)" "$(BINDIR)/$(BINARY)"; \
 		echo "installed $(BINDIR)/$(BINARY) without the window (run 'make gui' to see why it did not build)"; \
 	fi; \
-	rm -f "$(BINDIR)/$(GUI_BINARY)"
+	rm -f "$(BINDIR)/$(GUI_BINARY)"; \
+	ln -sf "$(BINARY)" "$(BINDIR)/lam-tui"
 	@# Only refresh the service that runs this install: an install elsewhere
 	@# (another PREFIX) must not repoint it.
 	@if grep -qF "$(BINDIR)/$(BINARY) daemon" $(HOME)/.config/systemd/user/lam-daemon.service 2>/dev/null; then \
@@ -93,7 +94,7 @@ release: ## Build the release archives and prepare the tag: make release TAG=v0.
 	@scripts/release.sh $(TAG)
 
 uninstall: ## Remove the installed binaries
-	rm -f "$(BINDIR)/$(BINARY)" "$(BINDIR)/$(GUI_BINARY)" "$(DESKTOP_DIR)/lam.desktop"
+	rm -f "$(BINDIR)/$(BINARY)" "$(BINDIR)/$(GUI_BINARY)" "$(BINDIR)/lam-tui" "$(DESKTOP_DIR)/lam.desktop"
 	@for s in $(ICON_SIZES); do rm -f "$(ICON_DIR)/hicolor/$${s}x$${s}/apps/lam.png"; done
 	rm -rf "$(APP_BUNDLE)"
 

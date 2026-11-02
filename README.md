@@ -65,6 +65,8 @@ connection, host-key and password questions are asked in the window. They use th
 instead when `--tui` is given, when `LAM_UI=tui` or `"ui": "tui"` is in the settings file, or when no
 window can open (a terminal-only build, no display, or a plain SSH login).
 
+`lam-tui` (installed next to `lam`) is the same command with the terminal interface as its default.
+
 `make install` puts one command, `lam`, on your PATH. On Linux it has the window built in when the
 Wayland/EGL development files are there (otherwise it is terminal-only); on macOS it installs
 `~/Applications/lam.app`, signed ad hoc, and `~/.local/bin/lam` points into it.

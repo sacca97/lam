@@ -5,8 +5,8 @@
 #   git push origin v0.2.0
 #
 # What a release holds (on Linux x86_64, which builds all of it):
-#   lam-linux-amd64, lam-darwin-arm64         the command line tool
-#   lam-gui-linux-amd64                        the desktop window for Linux
+#   lam-linux-amd64, lam-darwin-arm64         the command line tool, static: runs anywhere, headless too
+#   lam-linux-amd64-desktop                    the same with the desktop window for Linux (installs as lam)
 #   lam-app-darwin-arm64.tar.gz                lam.app, the desktop window for macOS
 #   lam-android.apk                            the Android app (arm64)
 #
@@ -49,7 +49,7 @@ make build VERSION="$tag"
 files=("lam-$(go env GOOS)-$(go env GOARCH)")
 cp lam "$out/${files[0]}"
 make gui VERSION="$tag"
-files+=("lam-gui-$(go env GOOS)-$(go env GOARCH)")
+files+=("lam-$(go env GOOS)-$(go env GOARCH)-desktop")
 cp lam-gui "$out/${files[1]}"
 if [ "$(go env GOOS)/$(go env GOARCH)" = linux/amd64 ]; then
     VERSION="$tag" scripts/cross-darwin.sh "$out/lam-darwin"
