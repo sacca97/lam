@@ -128,16 +128,14 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	listErr := g.listErr
 	g.mu.Unlock()
 
-	// Title bar part: the app and where its sessions run.
-	top := gtx.Dp(g.th.HeaderH)
+	// No heading: the sidebar is all search and sessions, from the top edge. The
+	// strip above the search still drags the window where lam draws its own title bar.
+	top := gtx.Dp(10)
 	moveArea(gtx, image.Rect(0, 0, size.X, top))
-	cy := top / 2
-	x := pad + gtx.Dp(6)
-	g.drawTextMid(gtx, image.Pt(x, cy), g.th.TitleSize, font.Bold, g.th.Text, "lam", size.X)
 
 	// Search, and the new session button.
 	fh := gtx.Dp(34)
-	fy := top + gtx.Dp(2)
+	fy := top
 	nb := image.Rect(size.X-pad-fh, fy, size.X-pad, fy+fh)
 	g.layoutSearch(gtx, image.Rect(pad, fy, nb.Min.X-gtx.Dp(6), fy+fh))
 	if g.ghostButton(gtx, "new", nb, "New session", true, func(gtx layout.Context, c image.Point, col color.NRGBA) {

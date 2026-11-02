@@ -81,14 +81,14 @@ func TestGUIRowMenuButtonStaysUnderThePointer(t *testing.T) {
 		}
 		d.frame()
 	}
-	move(100, 292) // over the selected row: the dots appear
-	move(236, 292) // onto the dots
-	move(237, 293) // and a little more, as a hand does
+	move(100, 256) // over the selected row: the dots appear
+	move(236, 256) // onto the dots
+	move(237, 257) // and a little more, as a hand does
 	dots := g.clickable("more-claude-lam")
 	if !dots.Hovered() {
 		t.Fatal("the dots did not get the pointer")
 	}
-	p := f32.Pt(237, 293)
+	p := f32.Pt(237, 257)
 	d.router.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p, Time: at + time.Millisecond},
 		pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: at + 2*time.Millisecond})
 	d.frame()
