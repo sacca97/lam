@@ -18,6 +18,7 @@ class Held(val name: String) {
     @Volatile var terminal: Terminal? = null
     @Volatile var attaching = false
     @Volatile var dead = false
+    private var closed = false
     @Volatile var sentCols = 0
     @Volatile var sentRows = 0
 
@@ -41,11 +42,16 @@ class Held(val name: String) {
             Thread {
                 try {
                     val attached = client.attach(name, cols.toLong(), rows.toLong(), output)
-                    synchronized(this) {
-                        sentCols = cols
-                        sentRows = rows
-                        terminal = attached
+                    val stale = synchronized(this) {
+                        if (!closed) {
+                            sentCols = cols
+                            sentRows = rows
+                            terminal = attached
+                        }
+                        closed
                     }
+                    // Evicted while attaching: nobody will close it later.
+                    if (stale) runCatching { attached.close() }
                 } catch (e: Exception) {
                     dead = true
                     remote.feed("\r\n[attach failed: ${e.message}]\r\n".toByteArray())
@@ -56,17 +62,22 @@ class Held(val name: String) {
         } else if (cols != sentCols || rows != sentRows) {
             sentCols = cols
             sentRows = rows
-            Thread { runCatching { t.resize(cols.toLong(), rows.toLong()) } }.start()
+            resizer.execute { runCatching { t.resize(cols.toLong(), rows.toLong()) } }
         }
     }
 
+    @Synchronized
     fun close() {
+        closed = true
         val t = terminal
         terminal = null
         remote.close()
         if (t != null) Thread { runCatching { t.close() } }.start()
     }
 }
+
+/** Resizes run one after the other, so the host ends at the last size asked for. */
+private val resizer = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "lam-resize").apply { isDaemon = true } }
 
 /**
  * Attached sessions, kept for the life of the process so that switching back is

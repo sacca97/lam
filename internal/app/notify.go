@@ -163,6 +163,9 @@ var notifyCommand = func(title, body string) (cmd *exec.Cmd, clickable bool) {
 // click reaches the app. Without it the helper command below is used.
 var notifyNative func(title, body string, onClick func()) bool
 
+// notifyWaitLimit is how long a click on a notification can still be reported.
+const notifyWaitLimit = 10 * time.Minute
+
 // notify shows a notification without waiting for it: the helper runs on its
 // own and is reaped in the background. onClick runs, on that background
 // goroutine, if the person clicks the notification and the system reports it.
@@ -184,6 +187,10 @@ func notify(title, body string, onClick func()) {
 		return
 	}
 	go func() {
+		// With an action, notify-send stays until the notification is closed, and
+		// some shells never report an expired one: it would linger for good.
+		stuck := time.AfterFunc(notifyWaitLimit, func() { cmd.Process.Kill() })
+		defer stuck.Stop()
 		if cmd.Wait() == nil && clickable && onClick != nil && strings.TrimSpace(out.String()) == "default" {
 			onClick()
 		}

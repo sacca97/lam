@@ -34,9 +34,16 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
     override fun onKeyUp(keyCode: Int, event: KeyEvent) = target.onKeyUp(keyCode, event)
 
     /** Called with the line being typed, empty once it is sent or cleared. */
-    var onPending: (String) -> Unit = {}
+    var onPending: (String, Int) -> Unit = { _, _ -> }
 
     private var connection: Connection? = null
+
+    /**
+     * The line being typed. It belongs to this view, not to one input connection: the
+     * keyboard drops and reopens its connection when it hides (a scroll does that), and
+     * what was typed must survive it.
+     */
+    private val line: android.text.Editable = android.text.SpannableStringBuilder().also { Selection.setSelection(it, 0) }
 
     /**
      * True: what is typed waits for Enter, so the keyboard sees the whole line.
@@ -45,8 +52,22 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
      */
     var lineMode = true
 
+    /** Moves the caret within the typed line; false when there is none, so the key goes to the terminal. */
+    fun moveCaret(delta: Int): Boolean {
+        if (line.isEmpty()) return false
+        Selection.setSelection(line, (Selection.getSelectionStart(line) + delta).coerceIn(0, line.length))
+        onPending(line.toString(), Selection.getSelectionStart(line))
+        connection?.report()
+        return true
+    }
+
     /** Drops what was typed without sending it (Ctrl+C does this). */
-    fun clearPending() = connection?.empty()
+    fun clearPending() {
+        line.clear()
+        Selection.setSelection(line, 0)
+        onPending("", 0)
+        connection?.report()
+    }
 
     private fun write(text: String) {
         val b = text.toByteArray()
@@ -58,9 +79,10 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_ACTION_SEND
         // Keyboards offer suggestions only for a field that says where its cursor is;
         // the default, -1, means "unknown".
-        outAttrs.initialSelStart = 0
-        outAttrs.initialSelEnd = 0
-        onPending("") // a new connection starts with an empty line
+        BaseInputConnection.removeComposingSpans(line) // a word the old connection was composing is final now
+        outAttrs.initialSelStart = Selection.getSelectionStart(line).coerceAtLeast(0)
+        outAttrs.initialSelEnd = Selection.getSelectionEnd(line).coerceAtLeast(0)
+        onPending(line.toString(), outAttrs.initialSelStart)
         return Connection().also { connection = it }
     }
 
@@ -72,13 +94,23 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
     private inner class Connection : BaseInputConnection(this, true) {
         private val imm = context.getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
 
+        override fun getEditable(): android.text.Editable = line
+
+        fun report() {
+            val e = editable!!
+            imm.updateSelection(
+                this@LamTerminalView, Selection.getSelectionStart(e), Selection.getSelectionEnd(e),
+                getComposingSpanStart(e), getComposingSpanEnd(e),
+            )
+        }
+
         private fun changed() {
             val e = editable!!
             imm.updateSelection(
                 this@LamTerminalView, Selection.getSelectionStart(e), Selection.getSelectionEnd(e),
                 getComposingSpanStart(e), getComposingSpanEnd(e),
             )
-            onPending(e.toString())
+            onPending(e.toString(), Selection.getSelectionStart(e).coerceIn(0, e.length))
         }
 
         fun empty() {
@@ -90,7 +122,11 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
 
         /** Enter: the line goes to the terminal. */
         private fun submit() {
-            write(PendingInput.lineToSend(editable!!)) // in live mode this is just what is still being composed, and the return
+            val text = editable!!.toString()
+            if (text.isNotEmpty()) write(PendingInput.lineToSend(text)) // in live mode, just what is still being composed
+            // Its own keypress, after the text: see PendingInput.lineToSend.
+            val session = currentSession // the one the line went to, even if the person switches meanwhile
+            postDelayed({ session?.write(byteArrayOf(13), 0, 1) }, PendingInput.enterDelayMs(text))
             empty()
         }
 

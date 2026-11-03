@@ -77,6 +77,7 @@ class TerminalActivity : ComponentActivity() {
     private var current: Held? = null
     private var currentName by mutableStateOf("")
     private var pending by mutableStateOf("")
+    private var caret by mutableStateOf(0)
     private var lineMode by mutableStateOf(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -97,17 +98,21 @@ class TerminalActivity : ComponentActivity() {
         var downY = 0f
         var hidden = false
         val slop = 24 * resources.displayMetrics.density
+        val hide = Runnable { hideKeyboard() }
         view.setOnTouchListener { _, e ->
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downY = e.y; hidden = false }
-                MotionEvent.ACTION_MOVE -> if (!hidden && e.y - downY > slop) { hidden = true; hideKeyboard() }
+                MotionEvent.ACTION_DOWN -> { downY = e.y; hidden = false; view.removeCallbacks(hide) }
+                // Only note the drag: hiding the keyboard resizes the terminal, which
+                // makes the host redraw, and doing that mid-scroll made it stutter.
+                MotionEvent.ACTION_MOVE -> if (e.y - downY > slop) hidden = true
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (hidden) { hidden = false; view.postDelayed(hide, 250) }
             }
             false // the terminal still scrolls
         }
         val prefs = getSharedPreferences("lam", MODE_PRIVATE)
         lineMode = prefs.getBoolean("lineMode", true)
         ime = LamTerminalView(this, view).apply {
-            onPending = { text -> pending = text }
+            onPending = { text, at -> pending = text; caret = at }
             this.lineMode = this@TerminalActivity.lineMode
         }
         Pool.view = view
@@ -185,7 +190,7 @@ class TerminalActivity : ComponentActivity() {
                     )
                     if (pending.isNotEmpty()) {
                         Text(
-                            pending.takeLast(300),
+                            pending.let { p -> p.substring(0, caret.coerceIn(0, p.length)) + "▏" + p.substring(caret.coerceIn(0, p.length)) },
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
                                 .fillMaxWidth()
@@ -206,13 +211,13 @@ class TerminalActivity : ComponentActivity() {
     /** The session's name, the keyboard, and the session list: it opens from here, not from an edge swipe (that is the back gesture). */
     @Composable
     private fun TopBar(openSessions: () -> Unit) {
-        Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().height(40.dp)) {
+        Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().height(52.dp)) {
             Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     currentName,
                     modifier = Modifier.weight(1f).padding(start = 14.dp),
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 15.sp,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -223,9 +228,9 @@ class TerminalActivity : ComponentActivity() {
                     if (!lineMode) ime.clearPending()
                     getSharedPreferences("lam", MODE_PRIVATE).edit().putBoolean("lineMode", lineMode).apply()
                 }) {
-                    Text(if (lineMode) "Line" else "Live", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(if (lineMode) "Line" else "Live", fontSize = 15.sp, color = MaterialTheme.colorScheme.primary)
                 }
-                TextButton(onClick = { showKeyboard() }) { Text("⌨", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface) }
+                TextButton(onClick = { showKeyboard() }) { Text("⌨", fontSize = 22.sp, color = MaterialTheme.colorScheme.onSurface) }
                 IconButton(onClick = openSessions) {
                     Icon(Icons.Filled.Menu, contentDescription = "Sessions", tint = MaterialTheme.colorScheme.onSurface)
                 }
@@ -249,10 +254,10 @@ class TerminalActivity : ComponentActivity() {
                 }
                 Key("Ctrl+C") { ime.clearPending(); send(byteArrayOf(0x03)) }
                 Key("Esc") { send(byteArrayOf(0x1b)) }
-                Key("←") { key(KeyEvent.KEYCODE_DPAD_LEFT) }
+                Key("←") { if (!ime.moveCaret(-1)) key(KeyEvent.KEYCODE_DPAD_LEFT) }
                 Key("↓") { key(KeyEvent.KEYCODE_DPAD_DOWN) }
                 Key("↑") { key(KeyEvent.KEYCODE_DPAD_UP) }
-                Key("→") { key(KeyEvent.KEYCODE_DPAD_RIGHT) }
+                Key("→") { if (!ime.moveCaret(1)) key(KeyEvent.KEYCODE_DPAD_RIGHT) }
             }
         }
     }

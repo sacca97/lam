@@ -151,6 +151,10 @@ func sockDead(err error) bool {
 func removeSessionFiles(name string) {
 	os.Remove(sessionSocket(name))
 	os.Remove(sessionMetaFile(name))
+	// What the agent and the daemon left in /tmp for this session: a stale unread
+	// marker would also mark a later session of the same name.
+	os.Remove(fmt.Sprintf("/tmp/claude-status-%s", name))
+	os.Remove(fmt.Sprintf("/tmp/claude-unread-%s", name))
 }
 
 // nativeBackend runs sessions under per-session host processes.

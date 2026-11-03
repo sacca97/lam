@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"image"
 	"image/draw"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gomono"
@@ -55,7 +57,7 @@ func desktopFont(mono bool) (family string, size float64) {
 	if mono {
 		key = "monospace-font-name"
 	}
-	if out, err := exec.Command("gsettings", "get", "org.gnome.desktop.interface", key).Output(); err == nil {
+	if out, err := fontTool("gsettings", "get", "org.gnome.desktop.interface", key); err == nil {
 		// 'Noto Sans Mono 10': the size is the last word.
 		v := strings.Trim(strings.TrimSpace(string(out)), "'")
 		if i := strings.LastIndexByte(v, ' '); i > 0 {
@@ -173,12 +175,25 @@ func builtinFont(data []byte) *fontFile {
 	return &fontFile{f: f, path: "builtin"}
 }
 
+// fontToolTimeout bounds the helpers the window asks for fonts and settings: a
+// hung dconf or fontconfig must not stall the window or pile up processes.
+const fontToolTimeout = 5 * time.Second
+
+// fontLookups limits the fc-match processes running at once.
+var fontLookups = make(chan struct{}, 3)
+
+func fontTool(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fontToolTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
 // fcMatch asks fontconfig for the file of a pattern.
 func fcMatch(pattern string) (path string, index int, family string) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "freebsd" {
 		return "", 0, ""
 	}
-	out, err := exec.Command("fc-match", "-f", "%{file}\n%{index}\n%{family}", pattern).Output()
+	out, err := fontTool("fc-match", "-f", "%{file}\n%{index}\n%{family}", pattern)
 	if err != nil {
 		return "", 0, ""
 	}
@@ -615,6 +630,9 @@ func (fb *fallbackFonts) scaled(face font.Face, r rune, px float64) font.Face {
 }
 
 func (fb *fallbackFonts) lookup(r rune) {
+	// A screen of unfamiliar characters asks for hundreds of fonts at once.
+	fontLookups <- struct{}{}
+	defer func() { <-fontLookups }()
 	var found *fontFile
 	candidates := []string{}
 	if path, index, _ := fcMatch("monospace:charset=" + strconv.FormatInt(int64(r), 16)); path != "" {

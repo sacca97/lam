@@ -4,10 +4,15 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PendingInputTest {
-    @Test fun enterSendsTheLineWithAReturn() {
-        assertEquals("ls -la\r", PendingInput.lineToSend("ls -la"))
-        assertEquals("\r", PendingInput.lineToSend(""))
-        assertEquals("a\rb\r", PendingInput.lineToSend("a\nb"))
+    @Test fun theLineGoesWithoutTheReturn() {
+        assertEquals("ls -la", PendingInput.lineToSend("ls -la"))
+        assertEquals("", PendingInput.lineToSend(""))
+        assertEquals("a\rb", PendingInput.lineToSend("a\nb"))
+    }
+
+    @Test fun theReturnFollowsAfterAPauseOnlyWhenThereWasALine() {
+        assertEquals(80L, PendingInput.enterDelayMs("ls"))
+        assertEquals(0L, PendingInput.enterDelayMs(""))
     }
 
     @Test fun deletesEatTheBufferFirst() {

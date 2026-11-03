@@ -33,7 +33,6 @@ class LamService : Service() {
     private var job: Job? = null
     private val detector = FinishDetector()
     private var shown = ""
-    private var nextId = 100
     private var failures = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -98,6 +97,8 @@ class LamService : Service() {
         }
     }
 
+    private val ids = HashMap<String, Int>()
+
     private fun finished(s: SessionItem) {
         if (TerminalActivity.onScreen == s.name) return
         val open = Intent(this, TerminalActivity::class.java).putExtra("name", s.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -111,7 +112,7 @@ class LamService : Service() {
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-        notify(nextId++, n)
+        notify(ids.getOrPut(s.name) { 100 + ids.size }, n) // one per session: a repeat replaces it
     }
 
     private fun notification(title: String, text: String): Notification {

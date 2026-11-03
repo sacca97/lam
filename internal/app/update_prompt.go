@@ -85,7 +85,7 @@ func pushBinary(host string) error {
 	if err := validateSSHHost(host); err != nil {
 		return err
 	}
-	out, err := exec.Command("ssh", "-T", "--", host, "uname -sm").Output()
+	out, err := exec.Command("ssh", "-T", "-o", "ConnectTimeout=10", "--", host, "uname -sm").Output()
 	if err != nil {
 		return fmt.Errorf("ask the remote host for its platform: %w", err)
 	}
@@ -107,7 +107,7 @@ func pushBinary(host string) error {
 	script := `mkdir -p "$HOME/.local/bin" && cat > "$HOME/.local/bin/lam.new" && chmod 755 "$HOME/.local/bin/lam.new" && mv "$HOME/.local/bin/lam.new" "$HOME/.local/bin/lam"` +
 		// A running daemon is still the old build.
 		`; if [ -f "$HOME/.config/systemd/user/lam-daemon.service" ] || [ -f "$HOME/Library/LaunchAgents/com.lam.daemon.plist" ]; then "$HOME/.local/bin/lam" install-service || true; fi`
-	cmd := exec.Command("ssh", "-T", "--", host, script)
+	cmd := exec.Command("ssh", "-T", "-o", "ConnectTimeout=10", "--", host, script)
 	cmd.Stdin, cmd.Stderr = f, os.Stderr
 	return cmd.Run()
 }
