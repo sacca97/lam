@@ -125,6 +125,25 @@ fun ConnectScreen(vm: ConnectViewModel) {
             }
         }
 
+        if (state.saved.isNotEmpty()) {
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                Column(Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 8.dp)) {
+                    Text("Saved passwords", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Kept encrypted on this phone, tried after the key.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                    )
+                    state.saved.forEach { account ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(account, Modifier.weight(1f), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                            TextButton(onClick = { vm.forgetPassword(account) }) { Text("Forget") }
+                        }
+                    }
+                }
+            }
+        }
+
         if (state.version.isNotEmpty()) {
             Text("lam v${state.version}", Modifier.fillMaxWidth(), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
         }

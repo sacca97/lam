@@ -76,6 +76,12 @@ func Run() {
 				os.Exit(1)
 			}
 			return
+		case "forget-password":
+			if err := forgetPasswordCmd(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "lam forget-password: %v\n", err)
+				os.Exit(2)
+			}
+			return
 		case "restore":
 			if err := restoreCmd(os.Args[2:]); err != nil {
 				fmt.Fprintf(os.Stderr, "lam restore: %v\n", err)
@@ -193,6 +199,7 @@ func printHelp() {
 	fmt.Println("  ps [--json]         List sessions with state, PID, age and directory (list is an alias)")
 	fmt.Println("  tail <session> [-f] Print session scrollback and screen as plain text")
 	fmt.Println("  send <session> <text>  Type text into a session and press Enter")
+	fmt.Println("  forget-password [user@host | --all]  List or forget the SSH passwords lam saved in the keychain")
 	fmt.Println("  restore [--list]    Reopen sessions that ended with a reboot or crash, resuming their agents")
 	fmt.Println("  gui                 Open the window and stay attached to this terminal")
 	fmt.Println("  ssh <host>          Open the window for sessions on an SSH host")

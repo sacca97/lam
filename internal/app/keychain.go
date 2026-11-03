@@ -3,8 +3,12 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -46,6 +50,14 @@ func vaultRun(stdin string, name string, args ...string) (string, error) {
 }
 
 func vaultStore(account, password string) error {
+	err := vaultStoreIn(account, password)
+	if err == nil {
+		vaultIndexAdd(account)
+	}
+	return err
+}
+
+func vaultStoreIn(account, password string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		// The password goes in on standard input, through security's own command
@@ -82,6 +94,7 @@ func vaultLookup(account string) (string, bool) {
 }
 
 func vaultDelete(account string) {
+	vaultIndexRemove(account)
 	switch runtime.GOOS {
 	case "darwin":
 		_, _ = vaultRun("", "security", "delete-generic-password", "-a", account, "-s", vaultService)
@@ -93,4 +106,84 @@ func vaultDelete(account string) {
 // securityQuote quotes a word for the security tool's command mode.
 func securityQuote(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", " ").Replace(s) + `"`
+}
+
+// The keychains cannot be listed without reading their secrets, so lam keeps the
+// names (user@host, never a password) of what it stored in a file of its own,
+// to show them and let the person forget them.
+func vaultIndexPath() string { return filepath.Join(stateDir(), "vault-accounts") }
+
+func vaultAccounts() []string {
+	data, err := os.ReadFile(vaultIndexPath())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func vaultIndexWrite(list []string) {
+	_ = os.MkdirAll(stateDir(), 0o700)
+	_ = os.WriteFile(vaultIndexPath(), []byte(strings.Join(list, "\n")+"\n"), 0o600)
+}
+
+func vaultIndexAdd(account string) {
+	list := vaultAccounts()
+	for _, a := range list {
+		if a == account {
+			return
+		}
+	}
+	vaultIndexWrite(append(list, account))
+}
+
+func vaultIndexRemove(account string) {
+	var keep []string
+	for _, a := range vaultAccounts() {
+		if a != account {
+			keep = append(keep, a)
+		}
+	}
+	vaultIndexWrite(keep)
+}
+
+// vaultForgetAll removes every password lam stored, and says how many.
+func vaultForgetAll() int {
+	list := vaultAccounts()
+	for _, a := range list {
+		vaultDelete(a)
+	}
+	return len(list)
+}
+
+// forgetPasswordCmd is `lam forget-password [user@host | --all]`.
+func forgetPasswordCmd(args []string) error {
+	list := vaultAccounts()
+	if len(args) == 0 {
+		if len(list) == 0 {
+			fmt.Println("No saved SSH passwords.")
+			return nil
+		}
+		fmt.Println("Saved SSH passwords (forget one with: lam forget-password user@host, or --all):")
+		for _, a := range list {
+			fmt.Println("  " + a)
+		}
+		return nil
+	}
+	if len(args) != 1 {
+		return errors.New("usage: lam forget-password [user@host | --all]")
+	}
+	if args[0] == "--all" {
+		fmt.Printf("Forgot %d saved password(s).\n", vaultForgetAll())
+		return nil
+	}
+	vaultDelete(args[0])
+	fmt.Printf("Forgot the saved password for %s.\n", args[0])
+	return nil
 }

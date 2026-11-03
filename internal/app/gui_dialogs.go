@@ -40,6 +40,7 @@ const (
 	dlgConnect
 	dlgAsk
 	dlgUpdate
+	dlgForget
 )
 
 type dialog struct {
@@ -242,7 +243,7 @@ func (g *guiApp) dialogKey(gtx layout.Context, ev key.Event) {
 		case ev.Name == key.NameRightArrow, enter, ev.Name == key.NameSpace:
 			g.changeSetting(d.row, 1)
 		}
-	case dlgStop, dlgQuitAll:
+	case dlgStop, dlgQuitAll, dlgForget:
 		switch {
 		case esc:
 			g.closeDialog()
@@ -366,6 +367,9 @@ func (g *guiApp) confirmDialog() {
 		g.advanceNewSession()
 	case dlgUpdate:
 		g.startInstall()
+	case dlgForget:
+		vaultForgetAll()
+		g.closeDialog()
 	case dlgRename:
 		newName := strings.TrimSpace(d.field.String())
 		if err := validSessionName(newName); err != nil {
@@ -533,9 +537,10 @@ func (g *guiApp) advanceNewSession() {
 }
 
 const (
-	guiSettingsRows = 8
-	settingUpdates  = 6 // look for a newer release
-	settingVersion  = 7 // the version, and the update when there is one
+	guiSettingsRows  = 9
+	settingUpdates   = 6 // look for a newer release
+	settingVersion   = 7 // the version, and the update when there is one
+	settingPasswords = 8 // the SSH passwords kept in the keychain
 )
 
 func (g *guiApp) changeSetting(row, step int) {
@@ -575,6 +580,11 @@ func (g *guiApp) changeSetting(row, step int) {
 		default:
 			g.upd.restore(readUpdateRecord().Tag)
 		}
+	case settingPasswords:
+		if step > 0 && len(vaultAccounts()) > 0 {
+			g.dlg = dialog{kind: dlgForget}
+		}
+		return
 	case settingVersion:
 		if step < 0 {
 			break
@@ -615,6 +625,7 @@ func (g *guiApp) settingValues() [guiSettingsRows][2]string {
 		{"Tailscale if off", tailscale},
 		{"Look for updates", map[bool]string{true: "On", false: "Off"}[updateChecksOn(s)]},
 		{"lam " + shownVersion(), g.upd.versionStatus()},
+		{"Saved SSH passwords", savedPasswordsLabel()},
 	}
 }
 
@@ -729,6 +740,9 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 				ok = d.ask.yesLabel
 			}
 		}
+	case dlgForget:
+		title, ok, cancel, danger = "Forget passwords", "Forget", "Cancel", true
+		body = []string{fmt.Sprintf("Forget %s?", savedPasswordsNoun()), "You will be asked for them again, the next time a key is refused."}
 	case dlgUpdate:
 		title, ok, cancel, body = g.updateDialogText()
 	case dlgSettings:
@@ -938,7 +952,7 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 				})
 				g.drawTextMid(gtx, image.Pt(gtx.Dp(12), r.Dy()/2), g.th.UISize, font.Normal, g.th.Text, row[0], inner/2)
 				value := "‹ " + row[1] + " ›"
-				if i == settingVersion {
+				if i == settingVersion || i == settingPasswords {
 					value = row[1]
 				}
 				g.drawTextRightMid(gtx, image.Pt(r.Dx()-gtx.Dp(12), r.Dy()/2), g.th.UISize, g.th.Accent, value)
@@ -1072,4 +1086,23 @@ func textSizeLabel(size float32, desktop bool) string {
 		label += " (default)"
 	}
 	return label
+}
+
+// savedPasswordsLabel is the settings row: how many passwords the keychain holds for lam.
+func savedPasswordsLabel() string {
+	switch n := len(vaultAccounts()); {
+	case !vaultAvailable():
+		return "No keychain"
+	case n == 0:
+		return "None"
+	default:
+		return fmt.Sprintf("Forget %d…", n)
+	}
+}
+
+func savedPasswordsNoun() string {
+	if n := len(vaultAccounts()); n != 1 {
+		return fmt.Sprintf("all %d saved passwords", n)
+	}
+	return "the saved password"
 }

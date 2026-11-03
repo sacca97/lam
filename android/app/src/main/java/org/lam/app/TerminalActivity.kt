@@ -77,6 +77,7 @@ class TerminalActivity : ComponentActivity() {
     private var current: Held? = null
     private var currentName by mutableStateOf("")
     private var pending by mutableStateOf("")
+    private var lineMode by mutableStateOf(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,7 +104,12 @@ class TerminalActivity : ComponentActivity() {
             }
             false // the terminal still scrolls
         }
-        ime = LamTerminalView(this, view).apply { onPending = { text -> pending = text } }
+        val prefs = getSharedPreferences("lam", MODE_PRIVATE)
+        lineMode = prefs.getBoolean("lineMode", true)
+        ime = LamTerminalView(this, view).apply {
+            onPending = { text -> pending = text }
+            this.lineMode = this@TerminalActivity.lineMode
+        }
         Pool.view = view
 
         setContent { LamTheme { Screen() } }
@@ -211,6 +217,14 @@ class TerminalActivity : ComponentActivity() {
                     maxLines = 1,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
+                TextButton(onClick = {
+                    lineMode = !lineMode
+                    ime.lineMode = lineMode
+                    if (!lineMode) ime.clearPending()
+                    getSharedPreferences("lam", MODE_PRIVATE).edit().putBoolean("lineMode", lineMode).apply()
+                }) {
+                    Text(if (lineMode) "Line" else "Live", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                }
                 TextButton(onClick = { showKeyboard() }) { Text("⌨", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface) }
                 IconButton(onClick = openSessions) {
                     Icon(Icons.Filled.Menu, contentDescription = "Sessions", tint = MaterialTheme.colorScheme.onSurface)

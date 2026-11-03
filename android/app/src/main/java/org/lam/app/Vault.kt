@@ -51,6 +51,9 @@ class Vault(context: Context) {
         }.getOrElse { forget(account); null } // a key that changed or data that is damaged is as good as none
     }
 
+    /** Whose passwords are kept, as user@host. */
+    fun accounts(): List<String> = prefs.all.keys.sorted()
+
     fun forget(account: String) = prefs.edit().remove(account).apply()
 
     companion object {

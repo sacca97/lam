@@ -38,6 +38,13 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
 
     private var connection: Connection? = null
 
+    /**
+     * True: what is typed waits for Enter, so the keyboard sees the whole line.
+     * False: each word goes to the terminal as it is finished, for programs that
+     * read keys as they come (vim, less, menus, tab completion).
+     */
+    var lineMode = true
+
     /** Drops what was typed without sending it (Ctrl+C does this). */
     fun clearPending() = connection?.empty()
 
@@ -83,7 +90,7 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
 
         /** Enter: the line goes to the terminal. */
         private fun submit() {
-            write(PendingInput.lineToSend(editable!!))
+            write(PendingInput.lineToSend(editable!!)) // in live mode this is just what is still being composed, and the return
             empty()
         }
 
@@ -92,9 +99,21 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
             changed()
         }
 
+        /** Live mode: whatever is finished goes straight to the terminal. */
+        private fun flushIfLive() {
+            if (lineMode) return
+            val e = editable!!
+            val composing = getComposingSpanStart(e) >= 0 && getComposingSpanEnd(e) > getComposingSpanStart(e)
+            if (e.isNotEmpty() && !composing) {
+                write(e.toString().replace('\n', '\r'))
+                empty()
+            }
+        }
+
         override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
             val ok = super.commitText(text, newCursorPosition)
             changed()
+            flushIfLive()
             return ok
         }
 
@@ -107,6 +126,7 @@ class LamTerminalView(context: Context, private val target: TerminalView) : View
         override fun finishComposingText(): Boolean {
             val ok = super.finishComposingText()
             changed()
+            flushIfLive()
             return ok
         }
 

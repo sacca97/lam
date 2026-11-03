@@ -25,6 +25,7 @@ data class ConnectState(
     val host: String = "",
     val recent: List<String> = emptyList(),
     val deviceKey: String = "",
+    val saved: List<String> = emptyList(), // user@host with a remembered password
     val busy: Boolean = false,
     val error: String? = null,
     val question: Question? = null,
@@ -36,7 +37,7 @@ class ConnectViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("lam", Application.MODE_PRIVATE)
     private val vault = Vault(app)
     private val _state = MutableStateFlow(
-        ConnectState(host = prefs.getString("host", "") ?: "", recent = recentHosts(), version = versionName())
+        ConnectState(host = prefs.getString("host", "") ?: "", recent = recentHosts(), version = versionName(), saved = vault.accounts())
     )
     val state: StateFlow<ConnectState> = _state.asStateFlow()
 
@@ -129,9 +130,17 @@ class ConnectViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun forgetPassword(account: String) {
+        vault.forget(account)
+        _state.update { it.copy(saved = vault.accounts()) }
+    }
+
     /** The password typed in the dialog; kept in the vault when the person asked for that. */
     fun answerPassword(q: Question.Password, password: String, remember: Boolean) {
-        if (remember && password.isNotEmpty()) vault.put(Vault.account(q.user, q.host), password)
+        if (remember && password.isNotEmpty()) {
+            vault.put(Vault.account(q.user, q.host), password)
+            _state.update { it.copy(saved = vault.accounts()) }
+        }
         answer(q, password)
     }
 
