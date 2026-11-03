@@ -189,6 +189,14 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	}) {
 		g.dlg = dialog{kind: dlgHelp}
 	}
+	// A newer release: a quiet button at the right end of the footer.
+	if tag, ok := g.upd.available(); ok {
+		chip := image.Pt(size.X-pad, fcy)
+		g.buttonStyled(gtx, "update-chip", "↑ "+tag, chip, true, false, false)
+		if g.clicked(gtx, "update-chip") {
+			g.openUpdate()
+		}
+	}
 	cr := hr.Add(image.Pt(b+gtx.Dp(2), 0))
 	if g.ghostButton(gtx, "connect", cr, "Connect to a host  "+map[bool]string{true: "⌘O", false: "Ctrl+Shift+O"}[guiMac], g.remote, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		if g.remote {
@@ -496,6 +504,9 @@ func (g *guiApp) layoutSection(gtx layout.Context, r guiRow, pad int) layout.Dim
 			gtx.Execute(op.InvalidateCmd{At: time.Now().Add(time.Second)})
 		} else {
 			iconCol = g.th.Accent
+			if v := g.mb.remoteVersion(); v != "" {
+				detail += " · " + v
+			}
 		}
 	}
 	x := band.Min.X + gtx.Dp(14)

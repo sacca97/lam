@@ -144,6 +144,13 @@ download against its published SHA-256 and swaps the binary in place. `lam updat
 only reports. When `lam ssh` finds the two ends on different releases, it says which one is
 older and offers to update it before connecting; nothing is changed without a `y`.
 
+The window shows its version in Settings and looks for a newer release once a day (it reads
+GitHub's public release list and sends nothing about you; turn it off in Settings, or with
+`LAM_UPDATE_CHECK=0`). A newer one appears as a button in the sidebar footer; clicking it and
+confirming downloads the build with the window (`lam-linux-amd64-desktop`, or the app tarball on
+a Mac), checks its digest and swaps it in. `lam update` does the same from the terminal. The
+Android app shows its version and offers the release APK when there is a newer one.
+
 Releases are built on your machine, because lam links libghostty through cgo, and published
 by pushing a tag, with no `gh` login:
 

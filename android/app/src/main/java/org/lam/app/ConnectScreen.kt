@@ -1,7 +1,12 @@
 package org.lam.app
 
+import android.content.Intent
+import android.net.Uri
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,7 +35,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.material3.Checkbox
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -55,6 +64,19 @@ fun ConnectScreen(vm: ConnectViewModel) {
             .padding(horizontal = 20.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        state.update?.let { update ->
+            val context = LocalContext.current
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("lam ${update.tag} is available", Modifier.weight(1f), color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    TextButton(onClick = { vm.dismissUpdate() }) { Text("Dismiss") }
+                    TextButton(onClick = {
+                        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.apkUrl))) }
+                    }) { Text("Update") }
+                }
+            }
+        }
+
         Column {
             Text("lam", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             Text("Sessions on your hosts, from your phone", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -102,6 +124,10 @@ fun ConnectScreen(vm: ConnectViewModel) {
                 ) { Text(if (copied) "Copied" else "Copy key") }
             }
         }
+
+        if (state.version.isNotEmpty()) {
+            Text("lam v${state.version}", Modifier.fillMaxWidth(), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+        }
     }
 
     when (val q = state.question) {
@@ -114,6 +140,7 @@ fun ConnectScreen(vm: ConnectViewModel) {
         )
         is Question.Password -> {
             var password by remember(q) { mutableStateOf("") }
+            var remember by remember(q) { mutableStateOf(false) }
             AlertDialog(
                 onDismissRequest = {},
                 title = { Text("Password for ${q.user}@${q.host}") },
@@ -127,11 +154,18 @@ fun ConnectScreen(vm: ConnectViewModel) {
                             label = { Text("Password") },
                             visualTransformation = PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Go),
-                            keyboardActions = KeyboardActions(onGo = { vm.answer(q, password) }),
+                            keyboardActions = KeyboardActions(onGo = { vm.answerPassword(q, password, remember) }),
                         )
+                        Row(
+                            Modifier.fillMaxWidth().clickable { remember = !remember },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = remember, onCheckedChange = { remember = it })
+                            Text("Remember on this phone", fontSize = 14.sp)
+                        }
                     }
                 },
-                confirmButton = { TextButton(onClick = { vm.answer(q, password) }) { Text("Log in") } },
+                confirmButton = { TextButton(onClick = { vm.answerPassword(q, password, remember) }) { Text("Log in") } },
                 dismissButton = { TextButton(onClick = { vm.answer(q, "") }) { Text("Cancel") } },
             )
         }

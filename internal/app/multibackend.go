@@ -222,3 +222,19 @@ func (m *multiBackend) Close() {
 		}
 	}
 }
+
+// remoteVersion is the build the connected host reported in its handshake, or "".
+func (m *multiBackend) remoteVersion() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	r := m.remote
+	m.mu.Unlock()
+	if rb, ok := r.(*remoteSessionBackend); ok {
+		if c := rb.cur(); c != nil {
+			return c.version
+		}
+	}
+	return ""
+}

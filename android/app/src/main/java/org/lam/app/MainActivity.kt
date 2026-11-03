@@ -1,6 +1,10 @@
 package org.lam.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -22,11 +26,22 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        askForNotifications()
         setContent {
             LamTheme {
                 Surface(color = MaterialTheme.colorScheme.background) { Root(connect) }
             }
         }
+    }
+
+    /** Android 13 and later ask before a notification may show; once is enough. */
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val prefs = getSharedPreferences("lam", MODE_PRIVATE)
+        if (prefs.getBoolean("askedNotifications", false)) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        prefs.edit().putBoolean("askedNotifications", true).apply()
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 }
 

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -47,8 +48,17 @@ func vaultRun(stdin string, name string, args ...string) (string, error) {
 func vaultStore(account, password string) error {
 	switch runtime.GOOS {
 	case "darwin":
-		_, err := vaultRun("", "security", "add-generic-password", "-U", "-a", account, "-s", vaultService, "-w", password)
-		return err
+		// The password goes in on standard input, through security's own command
+		// mode: as an argument it would show in the process list while it runs.
+		cmd := "add-generic-password -U -a " + securityQuote(account) + " -s " + vaultService + " -w " + securityQuote(password) + "\n"
+		if _, err := vaultRun(cmd, "security", "-i"); err != nil {
+			return err
+		}
+		// That mode does not always fail loudly: check the Keychain has it.
+		if got, ok := vaultLookup(account); !ok || got != password {
+			return errors.New("the Keychain did not keep the password")
+		}
+		return nil
 	case "linux":
 		_, err := vaultRun(password, "secret-tool", "store", "--label=lam ssh "+account, "service", vaultService, "account", account)
 		return err
@@ -78,4 +88,9 @@ func vaultDelete(account string) {
 	case "linux":
 		_, _ = vaultRun("", "secret-tool", "clear", "service", vaultService, "account", account)
 	}
+}
+
+// securityQuote quotes a word for the security tool's command mode.
+func securityQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", " ").Replace(s) + `"`
 }

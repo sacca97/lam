@@ -1,6 +1,7 @@
 package org.lam.app
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
@@ -13,7 +14,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.systemGestureExclusion
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -44,7 +46,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -61,16 +62,21 @@ import kotlinx.coroutines.withContext
 
 /**
  * Full-screen terminal with an extra-keys row above the soft keyboard and a drawer
- * (a swipe from the left edge) listing the host's sessions. Sessions
+ * (opened with the menu button; the left edge is left to the system back gesture) listing the host's sessions. Sessions
  * stay attached in [Pool], so switching is instant. The chrome is Compose; the
  * terminal itself is Termux's view.
  */
 class TerminalActivity : ComponentActivity() {
+    companion object {
+        /** The session showing right now, or "": a note that it finished would only repeat the screen. */
+        @Volatile var onScreen = ""
+    }
+
     private lateinit var view: TerminalView
     private lateinit var ime: LamTerminalView
     private var current: Held? = null
     private var currentName by mutableStateOf("")
-    private var composing by mutableStateOf("")
+    private var pending by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,13 +91,24 @@ class TerminalActivity : ComponentActivity() {
             setTypeface(Typeface.MONOSPACE)
             isFocusable = false // the keyboard view below holds focus
         }
-        ime = LamTerminalView(this, view).apply { onComposing = { text -> composing = text } }
+        // Scrolling back through the history puts the keyboard away, so the screen is
+        // free to read; a tap on the terminal brings it back.
+        var downY = 0f
+        var hidden = false
+        val slop = 24 * resources.displayMetrics.density
+        view.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { downY = e.y; hidden = false }
+                MotionEvent.ACTION_MOVE -> if (!hidden && e.y - downY > slop) { hidden = true; hideKeyboard() }
+            }
+            false // the terminal still scrolls
+        }
+        ime = LamTerminalView(this, view).apply { onPending = { text -> pending = text } }
         Pool.view = view
 
         setContent { LamTheme { Screen() } }
 
-        switchTo(name)
-        view.postDelayed({ showKeyboard() }, 300)
+        switchTo(name) // the keyboard stays away until the person taps the prompt or the ⌨ button
     }
 
     @Composable
@@ -104,7 +121,7 @@ class TerminalActivity : ComponentActivity() {
 
         // The list is read while the drawer is showing; a dead link ends the screen.
         LaunchedEffect(open) {
-            if (!open) { showKeyboard(); return@LaunchedEffect }
+            if (!open) return@LaunchedEffect
             hideKeyboard()
             while (true) {
                 vm.refresh()
@@ -114,6 +131,13 @@ class TerminalActivity : ComponentActivity() {
             }
         }
         BackHandler(open) { scope.launch { drawer.close() } }
+        // Disconnect from the notification closes the link under an open terminal.
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1000)
+                if (Conn.client == null) { Pool.closeAll(); finish(); return@LaunchedEffect }
+            }
+        }
 
         ModalNavigationDrawer(
             drawerState = drawer,
@@ -142,6 +166,7 @@ class TerminalActivity : ComponentActivity() {
             },
         ) {
             Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
+                TopBar { scope.launch { drawer.open() } }
                 Box(Modifier.weight(1f)) {
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
@@ -152,31 +177,44 @@ class TerminalActivity : ComponentActivity() {
                             }
                         },
                     )
-                    if (composing.isNotEmpty()) {
+                    if (pending.isNotEmpty()) {
                         Text(
-                            composing,
+                            pending.takeLast(300),
                             modifier = Modifier
                                 .align(Alignment.BottomStart)
+                                .fillMaxWidth()
                                 .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                                 .padding(horizontal = 10.dp, vertical = 4.dp),
                             color = MaterialTheme.colorScheme.primary,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 15.sp,
+                            maxLines = 3,
                         )
                     }
-                    // A swipe from the left edge opens the drawer; the system back gesture must not take it.
-                    Box(
-                        Modifier
-                            .align(Alignment.CenterStart)
-                            .fillMaxHeight()
-                            .width(20.dp)
-                            .systemGestureExclusion()
-                            .pointerInput(Unit) {
-                                detectHorizontalDragGestures { _, dx -> if (dx > 6f) scope.launch { drawer.open() } }
-                            },
-                    )
                 }
                 ExtraKeys()
+            }
+        }
+    }
+
+    /** The session's name, the keyboard, and the session list: it opens from here, not from an edge swipe (that is the back gesture). */
+    @Composable
+    private fun TopBar(openSessions: () -> Unit) {
+        Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().height(40.dp)) {
+            Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    currentName,
+                    modifier = Modifier.weight(1f).padding(start = 14.dp),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                TextButton(onClick = { showKeyboard() }) { Text("⌨", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = openSessions) {
+                    Icon(Icons.Filled.Menu, contentDescription = "Sessions", tint = MaterialTheme.colorScheme.onSurface)
+                }
             }
         }
     }
@@ -195,7 +233,7 @@ class TerminalActivity : ComponentActivity() {
                         shape = androidx.compose.ui.graphics.RectangleShape,
                     ) { Text(text, fontSize = 14.sp) }
                 }
-                Key("Ctrl+C") { send(byteArrayOf(0x03)) }
+                Key("Ctrl+C") { ime.clearPending(); send(byteArrayOf(0x03)) }
                 Key("Esc") { send(byteArrayOf(0x1b)) }
                 Key("←") { key(KeyEvent.KEYCODE_DPAD_LEFT) }
                 Key("↓") { key(KeyEvent.KEYCODE_DPAD_DOWN) }
@@ -206,6 +244,7 @@ class TerminalActivity : ComponentActivity() {
     }
 
     private fun switchTo(name: String) {
+        ime.clearPending() // what was typed was for the session just left
         val h = Pool.get(name)
         current = h
         currentName = name
@@ -254,7 +293,13 @@ class TerminalActivity : ComponentActivity() {
 
     private val viewClient = object : TerminalViewClient {
         override fun onScale(scale: Float): Float = 1f
-        override fun onSingleTapUp(e: MotionEvent?) = showKeyboard()
+        /** A tap brings the keyboard back only where text is typed: on the cursor's line or just beside it. */
+        override fun onSingleTapUp(e: MotionEvent?) {
+            val m = view.mEmulator ?: return
+            val tap = e ?: return
+            val row = view.getColumnAndRow(tap, false)[1]
+            if (kotlin.math.abs(row - (m.cursorRow - view.topRow)) <= 2) showKeyboard()
+        }
         override fun shouldBackButtonBeMappedToEscape() = false
         override fun shouldEnforceCharBasedInput() = false
         override fun shouldUseCtrlSpaceWorkaround() = false
@@ -277,6 +322,21 @@ class TerminalActivity : ComponentActivity() {
         override fun logVerbose(tag: String?, message: String?) {}
         override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
         override fun logStackTrace(tag: String?, e: Exception?) {}
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.getStringExtra("name")?.let { if (it != currentName) switchTo(it) }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        onScreen = currentName
+    }
+
+    override fun onStop() {
+        onScreen = ""
+        super.onStop()
     }
 
     override fun onDestroy() {

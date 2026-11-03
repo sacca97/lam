@@ -75,6 +75,7 @@ type guiApp struct {
 	remote              bool
 	mb                  *multiBackend // this machine's sessions and the connected host's
 	restorer            sessionRestorer
+	upd                 guiUpdate // the newer release, if any, and the install
 
 	// Shared with the list refresher and notification callbacks.
 	mu            sync.Mutex
@@ -386,6 +387,7 @@ func (g *guiApp) run() error {
 			}
 		}
 	}()
+	g.startUpdateChecks()
 	// Killed rather than closed: close the window the normal way, so the
 	// temporary shell is still cleaned up.
 	stop := make(chan os.Signal, 1)

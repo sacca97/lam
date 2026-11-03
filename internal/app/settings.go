@@ -28,6 +28,7 @@ type uiSettings struct {
 	MuteNotifications bool     `json:"muteNotifications,omitempty"` // no desktop notification when an agent finishes
 	GUIFontSize       float32  `json:"guiFontSize,omitempty"`       // terminal text size in lam-gui, in sp
 	GUILastHost       string   `json:"guiLastHost,omitempty"`       // the host lam-gui last connected to
+	NoUpdateCheck     bool     `json:"noUpdateCheck,omitempty"`     // do not look for a newer release in the window
 	UI                string   `json:"ui,omitempty"`                // "tui" makes lam ssh use the terminal interface instead of the window
 	TailscaleAutoUp   bool     `json:"tailscaleAutoUp,omitempty"`   // turn Tailscale on without asking before reaching a tailnet host
 	TailnetHosts      []string `json:"tailnetHosts,omitempty"`      // hosts seen as machines of the tailnet

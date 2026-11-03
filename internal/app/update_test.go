@@ -53,7 +53,7 @@ func TestInstallReleaseVerifiesAndReplaces(t *testing.T) {
 	}))
 	defer srv.Close()
 	asset := func(path, digest string) release {
-		return release{Tag: "v2.0.0", Assets: []releaseAsset{{Name: releaseAssetName(), URL: srv.URL + path, Digest: digest}}}
+		return release{Tag: "v2.0.0", Assets: []releaseAsset{{Name: installAssetName(), URL: srv.URL + path, Digest: digest}}}
 	}
 	target := filepath.Join(t.TempDir(), "lam")
 	os.WriteFile(target, []byte("old-binary"), 0o755)

@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"strings"
+	"time"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -38,6 +39,7 @@ const (
 	dlgHelp
 	dlgConnect
 	dlgAsk
+	dlgUpdate
 )
 
 type dialog struct {
@@ -247,6 +249,11 @@ func (g *guiApp) dialogKey(gtx layout.Context, ev key.Event) {
 		case enter:
 			g.confirmDialog()
 		}
+	case dlgUpdate:
+		// Replacing the program takes a click, never a stray Enter.
+		if esc {
+			g.closeDialog()
+		}
 	case dlgRestore:
 		switch {
 		case esc:
@@ -357,6 +364,8 @@ func (g *guiApp) confirmDialog() {
 		g.dlg = g.askPrev
 	case dlgNewSession:
 		g.advanceNewSession()
+	case dlgUpdate:
+		g.startInstall()
 	case dlgRename:
 		newName := strings.TrimSpace(d.field.String())
 		if err := validSessionName(newName); err != nil {
@@ -523,7 +532,11 @@ func (g *guiApp) advanceNewSession() {
 	}
 }
 
-const guiSettingsRows = 6
+const (
+	guiSettingsRows = 8
+	settingUpdates  = 6 // look for a newer release
+	settingVersion  = 7 // the version, and the update when there is one
+)
 
 func (g *guiApp) changeSetting(row, step int) {
 	s := &g.settings
@@ -552,6 +565,25 @@ func (g *guiApp) changeSetting(row, step int) {
 		g.setTheme(s.GUITheme)
 	case 5:
 		s.TailscaleAutoUp = !s.TailscaleAutoUp
+	case settingUpdates:
+		s.NoUpdateCheck = !s.NoUpdateCheck
+		switch {
+		case s.NoUpdateCheck:
+			g.upd.forget() // an update it found no longer shows
+		case time.Since(readUpdateRecord().CheckedAt) >= updateCheckEvery:
+			g.checkUpdateAsync()
+		default:
+			g.upd.restore(readUpdateRecord().Tag)
+		}
+	case settingVersion:
+		if step < 0 {
+			break
+		}
+		if _, ok := g.upd.available(); ok {
+			g.openUpdate()
+		} else {
+			g.checkUpdateAsync()
+		}
 	}
 	saveSettings(*s)
 }
@@ -581,6 +613,8 @@ func (g *guiApp) settingValues() [guiSettingsRows][2]string {
 		{"Text size", textSizeLabel(g.fontSize(), s.GUIFontSize == 0)},
 		{"Theme", theme},
 		{"Tailscale if off", tailscale},
+		{"Look for updates", map[bool]string{true: "On", false: "Off"}[updateChecksOn(s)]},
+		{"lam " + shownVersion(), g.upd.versionStatus()},
 	}
 }
 
@@ -695,6 +729,8 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 				ok = d.ask.yesLabel
 			}
 		}
+	case dlgUpdate:
+		title, ok, cancel, body = g.updateDialogText()
 	case dlgSettings:
 		title, cancel = "Settings", "Done"
 	case dlgHelp:
@@ -901,7 +937,11 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 					return layout.Dimensions{Size: r.Size()}
 				})
 				g.drawTextMid(gtx, image.Pt(gtx.Dp(12), r.Dy()/2), g.th.UISize, font.Normal, g.th.Text, row[0], inner/2)
-				g.drawTextRightMid(gtx, image.Pt(r.Dx()-gtx.Dp(12), r.Dy()/2), g.th.UISize, g.th.Accent, "‹ "+row[1]+" ›")
+				value := "‹ " + row[1] + " ›"
+				if i == settingVersion {
+					value = row[1]
+				}
+				g.drawTextRightMid(gtx, image.Pt(r.Dx()-gtx.Dp(12), r.Dy()/2), g.th.UISize, g.th.Accent, value)
 			}()
 			y += gtx.Dp(44)
 		}

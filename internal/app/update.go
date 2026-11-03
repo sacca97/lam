@@ -1,6 +1,9 @@
 package app
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -37,6 +40,24 @@ type release struct {
 // releaseAssetName is the executable of this platform in a release.
 func releaseAssetName() string {
 	return fmt.Sprintf("lam-%s-%s", runtime.GOOS, runtime.GOARCH)
+}
+
+// installAssetName is the release file that replaces this build: the one with
+// the window when this build has it, so an update never takes the window away.
+func installAssetName() string {
+	if guiBuilt {
+		return desktopAssetName()
+	}
+	return releaseAssetName()
+}
+
+// desktopAssetName is the build with the window: an executable on Linux, the
+// whole app as a tarball on macOS.
+func desktopAssetName() string {
+	if runtime.GOOS == "darwin" {
+		return fmt.Sprintf("lam-app-darwin-%s.tar.gz", runtime.GOARCH)
+	}
+	return releaseAssetName() + "-desktop"
 }
 
 func httpGet(url string, limit int64) ([]byte, error) {
@@ -130,7 +151,7 @@ var updateTarget = func() (string, error) {
 // installRelease downloads and installs the executable of a release for this
 // platform. It is checked against the digest GitHub recorded for the asset.
 func installRelease(r release) error {
-	name := releaseAssetName()
+	name := installAssetName()
 	var asset *releaseAsset
 	for i := range r.Assets {
 		if r.Assets[i].Name == name {
@@ -150,14 +171,130 @@ func installRelease(r release) error {
 			return fmt.Errorf("checksum mismatch for %s: not installing it", name)
 		}
 	}
-	if !looksExecutable(binary) {
-		return fmt.Errorf("%s is not an executable: not installing it", name)
-	}
 	target, err := updateTarget()
 	if err != nil {
 		return fmt.Errorf("find the lam executable: %w", err)
 	}
+	if strings.HasSuffix(name, ".tar.gz") {
+		bundle := appBundleOf(target)
+		if bundle == "" {
+			return fmt.Errorf("lam is not running from lam.app (%s): reinstall with make install", target)
+		}
+		return replaceAppBundle(bundle, binary)
+	}
+	if !looksExecutable(binary) {
+		return fmt.Errorf("%s is not an executable: not installing it", name)
+	}
 	return replaceExecutable(target, binary)
+}
+
+// appBundleOf is the lam.app that holds the executable at path, or "".
+func appBundleOf(path string) string {
+	if i := strings.Index(path, ".app/Contents/MacOS/"); i >= 0 {
+		return path[:i+len(".app")]
+	}
+	return ""
+}
+
+// replaceAppBundle swaps the app at bundle for the one in the tarball. The new
+// app is unpacked beside the old one and moved into place, so a failure leaves
+// the old app where it was.
+func replaceAppBundle(bundle string, tarball []byte) error {
+	parent := filepath.Dir(bundle)
+	staging, err := os.MkdirTemp(parent, ".lam-update-*")
+	if err != nil {
+		return fmt.Errorf("write next to %s: %w", bundle, err)
+	}
+	keepStaging := false
+	defer func() {
+		if !keepStaging {
+			os.RemoveAll(staging)
+		}
+	}()
+	if err := extractTarGz(tarball, staging); err != nil {
+		return err
+	}
+	// The app in the download is called lam.app, whatever the installed one is called.
+	fresh := filepath.Join(staging, "lam.app")
+	exe := filepath.Join(fresh, "Contents", "MacOS", "lam")
+	if st, err := os.Stat(exe); err != nil || st.IsDir() {
+		return errors.New("the app in the download has no Contents/MacOS/lam: not installing it")
+	}
+	head := make([]byte, 4)
+	if f, err := os.Open(exe); err == nil {
+		_, _ = io.ReadFull(f, head)
+		f.Close()
+	}
+	if !looksExecutable(head) {
+		return errors.New("the app in the download does not hold an executable: not installing it")
+	}
+	old := filepath.Join(staging, "old.app")
+	if err := os.Rename(bundle, old); err != nil {
+		return err
+	}
+	if err := os.Rename(fresh, bundle); err != nil {
+		if back := os.Rename(old, bundle); back != nil {
+			// The only copy of the old app is in the staging folder: keep it.
+			keepStaging = true
+			return fmt.Errorf("%w; the previous app could not be put back and is in %s", err, old)
+		}
+		return err
+	}
+	return nil
+}
+
+// extractTarGz unpacks directories and regular files only, and nothing that
+// would land outside dest.
+func extractTarGz(data []byte, dest string) error {
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("read the download: %w", err)
+	}
+	tr := tar.NewReader(zr)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read the download: %w", err)
+		}
+		name := filepath.Clean(h.Name)
+		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("the download holds an unsafe path %q", h.Name)
+		}
+		path := filepath.Join(dest, name)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(h.Mode)&0o777)
+			if err != nil {
+				return err
+			}
+			n, err := io.Copy(f, io.LimitReader(tr, maxReleaseDownload+1))
+			if err == nil && n > maxReleaseDownload {
+				err = fmt.Errorf("%q is larger than %d bytes", h.Name, maxReleaseDownload)
+			}
+			if err != nil {
+				f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+		case tar.TypeXGlobalHeader:
+			// Metadata about the archive, not a file.
+		default:
+			// Links and devices have no place in the app.
+			return fmt.Errorf("the download holds %q, which is not a plain file", h.Name)
+		}
+	}
 }
 
 // updateCmd is `lam update [--check] [vX.Y.Z]`.
@@ -174,12 +311,6 @@ func updateCmd(args []string) error {
 		default:
 			return errors.New("usage: lam update [--check] [version]")
 		}
-	}
-	if guiBuilt && !check {
-		// The release asset for this platform is the terminal-only build:
-		// installing it would take the window away.
-		return errors.New("this lam includes the window, which lam update would replace with the terminal-only build; " +
-			"reinstall instead (make install, or lam-app-darwin-arm64.tar.gz / lam-linux-amd64-desktop from the release)")
 	}
 	r, err := fetchRelease(tag)
 	if err != nil {
@@ -211,17 +342,25 @@ func updateCmd(args []string) error {
 		return err
 	}
 	fmt.Printf("Updated to %s.\n", r.Tag)
-	if daemonServiceInstalled() {
-		err := installService()
-		if err == nil {
-			err = restartDaemonService()
-		}
-		if err != nil {
-			fmt.Printf("Could not restart the background daemon: %v\n", err)
-		} else {
-			fmt.Println("Restarted the background daemon.")
-		}
+	if msg := restartDaemonAfterUpdate(); msg != "" {
+		fmt.Println(msg)
 	}
 	fmt.Println("Sessions keep running; restart open lam windows to use the new version.")
 	return nil
+}
+
+// restartDaemonAfterUpdate points the background daemon at the new executable.
+// It returns what to tell the person, or "" when there is no daemon service.
+func restartDaemonAfterUpdate() string {
+	if !daemonServiceInstalled() {
+		return ""
+	}
+	err := installService()
+	if err == nil {
+		err = restartDaemonService()
+	}
+	if err != nil {
+		return fmt.Sprintf("Could not restart the background daemon: %v", err)
+	}
+	return "Restarted the background daemon."
 }
