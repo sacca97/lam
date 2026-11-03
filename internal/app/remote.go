@@ -42,6 +42,8 @@ type remoteRequest struct {
 	Path    string   `json:"path,omitempty"`
 	Base    string   `json:"base,omitempty"`
 	Names   []string `json:"names,omitempty"`
+	Offset  int64    `json:"offset,omitempty"`
+	Length  int      `json:"length,omitempty"`
 }
 
 type remoteResponse struct {
@@ -59,6 +61,9 @@ type remoteResponse struct {
 	Restorable  []manifestEntry `json:"restorable,omitempty"`
 	Restored    int             `json:"restored,omitempty"`
 	Failures    []string        `json:"failures,omitempty"`
+	Data        []byte          `json:"data,omitempty"`     // read-file: a piece of the file
+	Size        int64           `json:"size,omitempty"`     // read-file: the whole file
+	Modified    int64           `json:"modified,omitempty"` // read-file: its modification time, unix nanoseconds
 }
 
 type remoteRPCResult struct {
@@ -812,6 +817,24 @@ func (b *remoteSessionBackend) CompleteSessionDir(input, base string) ([]string,
 	return response.Directories, err
 }
 
+// oldHost explains the answer of a host too old to know an operation.
+func oldHost(err error) error {
+	if err != nil && strings.Contains(err.Error(), "unknown operation") {
+		return errors.New("the host runs an older lam that cannot open documents; update it (lam update there)")
+	}
+	return err
+}
+
+func (b *remoteSessionBackend) CompleteDocumentPath(input, base string) ([]string, error) {
+	response, err := b.cur().call(remoteRequest{Op: "complete-path", Path: input, Base: base})
+	return response.Directories, oldHost(err)
+}
+
+func (b *remoteSessionBackend) ReadFileChunk(path string, offset int64, length int) (data []byte, size, modified int64, err error) {
+	response, err := b.cur().call(remoteRequest{Op: "read-file", Path: path, Offset: offset, Length: length})
+	return response.Data, response.Size, response.Modified, oldHost(err)
+}
+
 func (b *remoteSessionBackend) AvailableLaunchers() ([]string, error) {
 	response, err := b.cur().call(remoteRequest{Op: "launchers"})
 	return response.Launchers, err
@@ -887,6 +910,18 @@ func dispatchRemoteRequest(request remoteRequest) remoteResponse {
 			return fail(err)
 		}
 		response.Directories = directories
+	case "complete-path":
+		paths, err := completePaths(request.Path, request.Base, true)
+		if err != nil {
+			return fail(err)
+		}
+		response.Directories = paths
+	case "read-file":
+		data, size, modified, err := readFileChunk(request.Path, request.Offset, request.Length)
+		if err != nil {
+			return fail(err)
+		}
+		response.Data, response.Size, response.Modified = data, size, modified
 	case "launchers":
 		response.Launchers = installedLaunchers()
 	case "session-cwd":

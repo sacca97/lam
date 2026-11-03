@@ -71,8 +71,14 @@ type guiApp struct {
 	localHost           string // cached name of this machine
 	autoConnect         string // a host to connect to once the window is up (lam ssh HOST)
 	moreShown, moreNext string // the session whose three dots are shown, last frame and this one
+	plusShown, plusNext string // the same for the + on a project heading
 	pathSource          sessionDirectorySource
 	remote              bool
+	doc                 *docView   // the document in front, or nil when a session is
+	docs                []*docView // the open documents, as tabs
+	docText             *text.Shaper
+	docSans             font.Typeface
+	docShapes           map[docShapeKey]docShaped
 	mb                  *multiBackend // this machine's sessions and the connected host's
 	restorer            sessionRestorer
 	upd                 guiUpdate // the newer release, if any, and the install
@@ -468,6 +474,7 @@ func (g *guiApp) selectSession(name string) {
 	if name == "" {
 		return
 	}
+	g.doc = nil // the session comes to the front; the documents stay as tabs
 	g.mu.Lock()
 	g.selected = name
 	for i := range g.sessions {
@@ -898,6 +905,11 @@ func (g *guiApp) layoutMain(gtx layout.Context) {
 		return image.Rect(r.Min.X+pad, r.Min.Y+pad/2, r.Max.X-pad/2, r.Max.Y-pad/2)
 	}
 
+	if g.doc != nil {
+		g.termView.attach(nil)
+		g.layoutDoc(gtx, body)
+		return
+	}
 	mr := inner(mainR)
 	if mr.Dx() > 10 && mr.Dy() > 10 {
 		cols, rows := g.mainView.gridSize(mr.Size())
@@ -1029,8 +1041,24 @@ func (g *guiApp) layoutHeader(gtx layout.Context, width, h int) {
 		x -= gtx.Dp(8)
 	}
 
+	if g.doc != nil {
+		// A document is in front: its tab, with Reload at the right.
+		xr := x - gtx.Dp(8)
+		if !g.doc.loading {
+			xr -= g.button(gtx, "doc-reload", "Reload", image.Pt(xr, cy), true, false) + gtx.Dp(8)
+			if g.clicked(gtx, "doc-reload") {
+				g.loadDocument(g.doc)
+			}
+		}
+		g.layoutTabs(gtx, pad, xr, cy)
+		return
+	}
 	s, ok := g.selectedInfo()
 	if !ok {
+		if len(g.docs) > 0 {
+			g.layoutTabs(gtx, pad, x, cy)
+			return
+		}
 		if g.emptyShell != nil {
 			g.drawTextMid(gtx, image.Pt(pad, cy), g.th.UISize, font.SemiBold, g.th.Text, "Shell", x-pad)
 		}
@@ -1065,6 +1093,11 @@ func (g *guiApp) layoutHeader(gtx layout.Context, width, h int) {
 		g.toggleTerminal()
 	}
 
+	if len(g.docs) > 0 {
+		// The session is one tab among the open documents'.
+		g.layoutTabs(gtx, pad, x, cy)
+		return
+	}
 	// Title: the session, then its folder and state.
 	tx := pad
 	w := g.drawTextMid(gtx, image.Pt(tx, cy), g.th.UISize, font.SemiBold, g.th.Text, s.Name, x-tx-gtx.Dp(20))
@@ -1224,6 +1257,8 @@ func (g *guiApp) handleKeys(gtx layout.Context) {
 				g.dialogKey(gtx, ev)
 			case g.menu != nil && ev.Name == key.NameEscape:
 				g.menu = nil
+			case g.focus != focusFilter && g.docKey(ev):
+				gtx.Execute(op.InvalidateCmd{})
 			case g.shortcut(gtx, ev):
 			case g.focus == focusFilter:
 				g.filterKey(ev)
@@ -1231,6 +1266,8 @@ func (g *guiApp) handleKeys(gtx layout.Context) {
 				// Cmd combinations are the application's, never the program's.
 			case printable(ev.Name) && !ctrlAltSuper:
 				// The character arrives as an EditEvent.
+			case g.doc != nil:
+				// A document takes no input.
 			default:
 				if v := g.focusedView(); v != nil {
 					v.key(ev.Name, ev.Modifiers)
@@ -1250,6 +1287,7 @@ func (g *guiApp) handleKeys(gtx layout.Context) {
 				g.dialogText(ev.Text)
 			case g.focus == focusFilter:
 				g.filter += ev.Text
+			case g.doc != nil:
 			default:
 				if v := g.focusedView(); v != nil {
 					v.text(ev.Text)
@@ -1328,6 +1366,14 @@ func (g *guiApp) shortcut(gtx layout.Context, ev key.Event) bool {
 		g.openNewSession()
 	case cs && ev.Name == "O":
 		g.openConnect()
+	case m.Contain(key.ModCtrl) && ev.Name == key.NameTab && len(g.docs) > 0:
+		if shift {
+			g.cycleTab(-1)
+		} else {
+			g.cycleTab(1)
+		}
+	case cs && ev.Name == "D":
+		g.openDocumentDialog()
 	case cs && ev.Name == "F":
 		g.focus, g.hideSide = focusFilter, false
 	case cs && ev.Name == "R":

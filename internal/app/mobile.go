@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,6 +73,58 @@ func (l *MobileLink) Sessions() ([]MobileSession, error) {
 		out = append(out, MobileSession{Name: s.Name, CWD: s.CWD, Command: s.Command, Activity: s.Activity, Unread: s.Unread, Clients: s.Clients})
 	}
 	return out, nil
+}
+
+// Launchers lists the agents installed on the host, in the usual order. A plain
+// terminal is always possible and is not listed.
+func (l *MobileLink) Launchers() ([]string, error) {
+	got, err := l.b.AvailableLaunchers()
+	if err != nil {
+		return nil, err
+	}
+	return orderedSupportedLaunchers(got), nil
+}
+
+// Home is the host's home directory, where a new session starts by default.
+func (l *MobileLink) Home() (string, error) { return l.b.HomeDirectory() }
+
+// CompleteDir lists the host's directories that continue input, as the
+// desktop's Tab completion does.
+func (l *MobileLink) CompleteDir(input, base string) ([]string, error) {
+	return l.b.CompleteSessionDir(input, base)
+}
+
+// CreateSession starts a session on the host in dir (empty means home) and
+// returns its name, made like the desktop's: tool and folder, such as
+// claude-api. launcher "terminal" starts a shell.
+func (l *MobileLink) CreateSession(launcher, dir string) (string, error) {
+	home, err := l.b.HomeDirectory()
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(dir) == "" {
+		dir = home
+	}
+	cwd, err := l.b.ResolveSessionDir(strings.TrimSpace(dir), home)
+	if err != nil {
+		return "", err
+	}
+	command := fallbackShellCommand
+	if launcher != "terminal" {
+		if !slices.Contains(supportedLaunchers, launcher) {
+			return "", fmt.Errorf("unknown agent %q", launcher)
+		}
+		command = launcherCmd(launcher, "")
+	}
+	existing, err := l.b.List()
+	if err != nil {
+		return "", err
+	}
+	name := launcherSessionName(launcher, cwd, existing)
+	if err := l.b.Create(name, cwd, command); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // Done is closed when the connection is lost.

@@ -121,6 +121,7 @@ func moveArea(gtx layout.Context, r image.Rectangle) {
 
 func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	g.moreShown, g.moreNext = g.moreNext, "" // the row whose dots were shown last frame
+	g.plusShown, g.plusNext = g.plusNext, "" // likewise the project heading whose + was shown
 	size := gtx.Constraints.Max
 	paint.FillShape(gtx.Ops, g.th.Sidebar, clip.Rect{Max: size}.Op())
 	pad := gtx.Dp(g.th.Pad)
@@ -548,7 +549,10 @@ func (g *guiApp) layoutGroupHeader(gtx layout.Context, r guiRow, pad int) layout
 	if c.Clicked(gtx) {
 		g.toggleProject(key)
 	}
-	hovered := c.Hovered()
+	// The + sits on top of the heading, so the pointer over it is no longer over
+	// the heading: it stays shown while it was shown last frame, or the click
+	// would land on the heading and only fold the project.
+	hovered := c.Hovered() || g.plusShown == key
 	dims := c.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		pointer.CursorPointer.Add(gtx.Ops)
 		return layout.Dimensions{Size: image.Pt(w, h)}
@@ -572,6 +576,9 @@ func (g *guiApp) layoutGroupHeader(gtx layout.Context, r guiRow, pad int) layout
 			iconPlus(gtx, c, float32(gtx.Dp(4.5)), float32(max(1, gtx.Dp(1.4))), col)
 		}) {
 			g.openNewSessionIn(r.cwd, r.host)
+		}
+		if c.Hovered() || g.clickable("new-in-"+key).Hovered() {
+			g.plusNext = key
 		}
 		right = br.Min.X - gtx.Dp(6)
 	}

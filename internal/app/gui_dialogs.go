@@ -41,6 +41,7 @@ const (
 	dlgAsk
 	dlgUpdate
 	dlgForget
+	dlgOpenDoc
 )
 
 type dialog struct {
@@ -52,10 +53,11 @@ type dialog struct {
 	wizard   sessionWizard
 	row      int // settings row
 	scrim    bool
-	cardTag  bool    // the card takes presses, so only the scrim around it dismisses
-	busy     bool    // connecting
-	remember bool    // keep the password in the keychain
-	ask      *sshAsk // the SSH client's question
+	cardTag  bool       // the card takes presses, so only the scrim around it dismisses
+	busy     bool       // connecting
+	remember bool       // keep the password in the keychain
+	ask      *sshAsk    // the SSH client's question
+	pick     *docPicker // the file browser of the open-document dialog
 }
 
 // textField is a one-line editor using the TUI's editing helpers.
@@ -173,6 +175,63 @@ func (g *guiApp) sessionsOn(host string) []sessionInfo {
 	return out
 }
 
+// openDocumentDialog asks for a markdown or PDF file on the machine of the
+// session being looked at, starting in that session's folder.
+func (g *guiApp) openDocumentDialog() {
+	host, start := "", g.launchDir
+	if s, ok := g.selectedInfo(); ok {
+		host = s.Host
+		if s.CWD != "" {
+			start = s.CWD
+		} else if host != "" {
+			start = ""
+		}
+	}
+	src := g.sourceFor(host)
+	if start == "" {
+		if dir, err := src.WorkingDirectory(); err == nil {
+			start = dir
+		}
+	}
+	g.dlg = dialog{kind: dlgOpenDoc, target: sessionInfo{Host: host, CWD: start}, pick: &docPicker{host: host, base: start, sel: -1}}
+	g.dlg.field.set(dirField(start, src))
+	g.dlg.pick.hist = []string{g.dlg.field.String()}
+	g.pickRefresh()
+}
+
+// dirField is a folder as the field shows it: the path with a closing slash,
+// which "/" already has.
+func dirField(dir string, src sessionDirectorySource) string {
+	if shown := shortenHomePath(dir, src); shown != "/" {
+		return shown + "/"
+	}
+	return "/"
+}
+
+// completeDocument completes the path in the open-document dialog on Tab.
+func (g *guiApp) completeDocument() {
+	d := &g.dlg
+	completer, ok := g.documentSourceFor(d.target.Host).(documentCompleter)
+	if !ok {
+		return
+	}
+	input := d.field.String()
+	matches, err := completer.CompleteDocumentPath(input, d.target.CWD)
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	switch len(matches) {
+	case 0:
+	case 1:
+		d.field.set(matches[0])
+	default:
+		d.field.set(commonDirectoryPrefix(matches))
+		names := directoryCompletionLabels(input, matches)
+		d.err = strings.Join(names[:min(len(names), 8)], "   ")
+	}
+}
+
 func (g *guiApp) openRename(s sessionInfo) {
 	g.dlg = dialog{kind: dlgRename, target: s}
 	g.dlg.field.set(shortName(s.Name))
@@ -200,12 +259,13 @@ func (g *guiApp) closeDialog() {
 
 func (g *guiApp) dialogText(s string) {
 	switch g.dlg.kind {
-	case dlgRename, dlgConnect:
+	case dlgRename, dlgConnect, dlgOpenDoc:
 		if g.dlg.busy {
 			return
 		}
 		g.dlg.field.insert(s)
 		g.dlg.err = ""
+		g.pickEdited()
 	case dlgAsk:
 		if !g.dlg.ask.yesNo {
 			g.dlg.field.insert(s)
@@ -262,15 +322,20 @@ func (g *guiApp) dialogKey(gtx layout.Context, ev key.Event) {
 		case enter:
 			g.confirmDialog()
 		}
-	case dlgRename, dlgConnect:
+	case dlgRename, dlgConnect, dlgOpenDoc:
 		switch {
 		case esc:
 			g.closeDialog()
+		case d.kind == dlgOpenDoc && g.pickKey(ev):
 		case enter:
 			g.confirmDialog()
 		case d.busy:
+		case ev.Name == key.NameTab && d.kind == dlgOpenDoc:
+			g.completeDocument()
+			g.pickEdited()
 		case d.field.key(ev):
 			d.err = ""
+			g.pickEdited()
 		}
 	case dlgAsk:
 		switch {
@@ -370,6 +435,24 @@ func (g *guiApp) confirmDialog() {
 	case dlgForget:
 		vaultForgetAll()
 		g.closeDialog()
+	case dlgOpenDoc:
+		src := g.sourceFor(d.target.Host)
+		home, herr := src.HomeDirectory()
+		if in := strings.TrimSpace(d.field.String()); (herr != nil || home == "") && (in == "~" || strings.HasPrefix(in, "~/")) {
+			d.err = "Cannot find the home folder on that machine"
+			return
+		}
+		p := absoluteDocPath(d.field.String(), d.target.CWD, home)
+		if documentKind(p) == docNone {
+			if strings.HasSuffix(strings.TrimSpace(d.field.String()), "/") || d.field.String() == "" {
+				return // a folder: the list shows it
+			}
+			d.err = "Not a markdown or PDF file"
+			return
+		}
+		host := d.target.Host
+		g.closeDialog()
+		g.openDocument(host, p)
 	case dlgRename:
 		newName := strings.TrimSpace(d.field.String())
 		if err := validSessionName(newName); err != nil {
@@ -641,6 +724,8 @@ func guiShortcuts() [][2]string {
 			{"⌘↑/↓, ⌘⇧[ / ]", "Previous/next session"},
 			{"⌘F", "Filter sessions"},
 			{"⌘O", "Connect to a host over SSH"},
+			{"⌘D", "Open a markdown or PDF file as a tab"},
+			{"⌘W, Ctrl+Tab", "Close the document in front, go round the tabs"},
 			{"⌘C / ⌘V", "Copy / paste"},
 			{"Right click", "Copy selection, or paste"},
 			{"⇧PgUp/PgDn, wheel", "Scroll history"},
@@ -661,6 +746,8 @@ func guiShortcuts() [][2]string {
 		{"Ctrl+Shift+↑/↓, Ctrl+PgUp/PgDn", "Previous/next session"},
 		{"Ctrl+Shift+F", "Filter sessions"},
 		{"Ctrl+Shift+O", "Connect to a host over SSH"},
+		{"Ctrl+Shift+D", "Open a markdown or PDF file as a tab"},
+		{"Ctrl+W, Ctrl+Tab", "Close the document in front, go round the tabs"},
 		{"Ctrl+Shift+C / V", "Copy / paste"},
 		{"Right click", "Copy selection, or paste"},
 		{"Shift+PgUp/PgDn, wheel", "Scroll history"},
@@ -709,6 +796,12 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 		}
 	case dlgRename:
 		title, ok, cancel = "Rename session", "Rename", "Cancel"
+	case dlgOpenDoc:
+		title, ok, cancel = "Open a document", "Open", "Cancel"
+		body = []string{"Pick a markdown or PDF file, or type its path."}
+		if d.target.Host != "" {
+			body[0] = "Pick a markdown or PDF file on " + d.target.Host + ", or type its path."
+		}
 	case dlgStop:
 		title, ok, cancel, danger = "Stop session", "Stop", "Cancel", true
 		body = []string{fmt.Sprintf("Stop %s?", d.target.Name), "Its running program will be terminated."}
@@ -756,6 +849,9 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	switch d.kind {
 	case dlgRename, dlgConnect:
 		contentH += gtx.Dp(44)
+	case dlgOpenDoc:
+		docPickVisible = min(9, max(3, (size.Y-gtx.Dp(370))/gtx.Dp(docPickRowDp)))
+		contentH += gtx.Dp(48) + gtx.Dp(30) + docPickVisible*gtx.Dp(docPickRowDp) + gtx.Dp(8)
 	case dlgAsk:
 		if !d.ask.yesNo {
 			contentH += gtx.Dp(44)
@@ -817,6 +913,9 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	case dlgRename:
 		g.drawField(gtx, image.Rect(pad, y, pad+inner, y+gtx.Dp(36)), &d.field, "")
 		y += gtx.Dp(44)
+	case dlgOpenDoc:
+		y += gtx.Dp(6)
+		y += g.layoutDocPick(gtx, pad, y, inner) + gtx.Dp(8)
 	case dlgConnect:
 		hint := "user@host, or a name from ~/.ssh/config"
 		if d.busy {

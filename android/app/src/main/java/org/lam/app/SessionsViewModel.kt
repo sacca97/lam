@@ -51,4 +51,23 @@ class SessionsViewModel : ViewModel() {
             }
         }
     }
+
+    /** The agents installed on the host and its home directory, for the new-session dialog. */
+    suspend fun newSessionChoices(): Result<Pair<List<String>, String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val client = Conn.client ?: error("not connected")
+            val agents = client.launchers().lines().filter { it.isNotBlank() }
+            agents to client.home()
+        }
+    }
+
+    /** Directories on the host that continue what was typed; empty on any problem. */
+    suspend fun completeDir(input: String, home: String): List<String> = withContext(Dispatchers.IO) {
+        runCatching { Conn.client?.completeDir(input, home)?.lines()?.filter { it.isNotBlank() } }.getOrNull() ?: emptyList()
+    }
+
+    /** Starts the session and returns its name. */
+    suspend fun createSession(launcher: String, dir: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching { (Conn.client ?: error("not connected")).createSession(launcher, dir) }
+    }
 }

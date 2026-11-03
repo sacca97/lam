@@ -71,6 +71,14 @@ window can open (a terminal-only build, no display, or a plain SSH login).
 Wayland/EGL development files are there (otherwise it is terminal-only); on macOS it installs
 `~/Applications/lam.app`, signed ad hoc, and `~/.local/bin/lam` points into it.
 
+In the window, `Ctrl+Shift+D` (`⌘D` on a Mac) opens a small file browser, starting in the folder of the selected session, that lists its folders and its markdown and PDF files (click one, or type a path; the buttons and the path above the list, or `Alt+←`/`Alt+→`/`Alt+↑`, go back, forward and up a folder); the file opens as a tab next to the session's, from the machine
+of the session you are looking at, including a host connected over SSH (the file is read over the same
+connection). Markdown is drawn on a white page with tables, task lists and code blocks; a relative link to
+another `.md` or `.pdf` opens it in place and other links open in the browser. PDFs are rendered page by
+page (the renderer is PDFium, built into the window version of `lam`, nothing to install); scroll with the
+wheel or the keys, zoom with `Ctrl` and the wheel or `Ctrl+=`/`Ctrl+-`, `R` reloads. Several files can be open at once; each is a tab with a cross, `Ctrl+W` (`⌘W` on a Mac) closes the one in front, and `Ctrl+Tab` goes round the tabs. Files up
+to 8 MB (markdown) and 128 MB (PDF) open.
+
 `lam` opens the shared session list, so you do not need to name or attach to an existing session
 to get back to it. `lam attach <session>` remains available when you want to connect directly to
 one session without opening the interface. `lam new` is an alias for `lam start`.

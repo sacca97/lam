@@ -5,6 +5,7 @@ package app
 import (
 	"image/png"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,5 +96,48 @@ func TestGUIRowMenuButtonStaysUnderThePointer(t *testing.T) {
 	d.frame()
 	if g.menu == nil {
 		t.Fatal("clicking the three dots did not open the menu")
+	}
+}
+
+// The + on a project heading shows while the pointer is over the heading and
+// must stay when the pointer moves onto it: a click on it asks for a new
+// session in that folder instead of folding the project.
+func TestGUIProjectPlusStaysUnderThePointer(t *testing.T) {
+	e := testPane(t, 80, 24)
+	g := newTestApp(t, e)
+	d := &guiDriver{t: t, g: g}
+	d.frame()
+	d.frame()
+	at := time.Duration(0)
+	move := func(x, y float32) {
+		for i := 0; i < 2; i++ {
+			at += time.Millisecond
+			d.router.Queue(pointer.Event{Kind: pointer.Move, Source: pointer.Mouse, Position: f32.Pt(x, y), Time: at})
+			d.frame()
+		}
+		d.frame()
+	}
+	move(100, 223) // over the heading of the second project: its + appears
+	var id string
+	for k := range g.buttons {
+		if strings.HasPrefix(k, "new-in-") {
+			id = k
+		}
+	}
+	if id == "" {
+		t.Fatal("the + did not appear on the heading")
+	}
+	move(226, 225) // onto the +
+	move(227, 226) // and a little more
+	if !g.clickable(id).Hovered() {
+		t.Fatal("the + did not get the pointer")
+	}
+	p := f32.Pt(227, 226)
+	d.router.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p, Time: at + time.Millisecond},
+		pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: at + 2*time.Millisecond})
+	d.frame()
+	d.frame()
+	if g.dlg.kind != dlgNewSession {
+		t.Fatalf("clicking the + opened dialog %v, not a new session", g.dlg.kind)
 	}
 }

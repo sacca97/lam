@@ -200,6 +200,27 @@ func (c *Client) Sessions() (*SessionList, error) {
 	return out, nil
 }
 
+// Launchers lists the agents installed on the host, one per line.
+func (c *Client) Launchers() (string, error) {
+	list, err := c.cur().Launchers()
+	return strings.Join(list, "\n"), err
+}
+
+// Home is the host's home directory.
+func (c *Client) Home() (string, error) { return c.cur().Home() }
+
+// CompleteDir lists host directories that continue input, one per line.
+func (c *Client) CompleteDir(input, base string) (string, error) {
+	list, err := c.cur().CompleteDir(input, base)
+	return strings.Join(list, "\n"), err
+}
+
+// CreateSession starts a session on the host and returns its name; launcher
+// "terminal" starts a shell, and an empty dir means the host's home.
+func (c *Client) CreateSession(launcher, dir string) (string, error) {
+	return c.cur().CreateSession(launcher, dir)
+}
+
 // Alive reports whether the connection is still up.
 func (c *Client) Alive() bool {
 	select {

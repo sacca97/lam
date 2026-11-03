@@ -7,6 +7,8 @@ require golang.org/x/term v0.47.0
 require (
 	gioui.org v0.10.3
 	github.com/kevinburke/ssh_config v1.6.0
+	github.com/klippa-app/go-pdfium v1.21.4
+	github.com/yuin/goldmark v1.8.7
 	golang.org/x/crypto v0.58.0
 	golang.org/x/image v0.47.0
 	golang.org/x/mobile v0.0.0-20261011034528-197770444867
@@ -17,6 +19,9 @@ require (
 	gioui.org/shader v1.0.9 // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/jolestar/go-commons-pool/v2 v2.1.2 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	golang.org/x/exp/shiny v0.0.0-20261009195045-ca0d7ba23607 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.61.0 // indirect

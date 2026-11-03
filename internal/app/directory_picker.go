@@ -29,6 +29,12 @@ func (localDirectorySource) CompleteSessionDir(input, base string) ([]string, er
 }
 
 func completeSessionDirs(input, base string) ([]string, error) {
+	return completePaths(input, base, false)
+}
+
+// completePaths is completeSessionDirs, which can also offer the documents the
+// viewer opens (markdown and PDF files).
+func completePaths(input, base string, documents bool) ([]string, error) {
 	if input == "~" {
 		if _, err := resolveSessionDir(input, base); err == nil {
 			return []string{"~/"}, nil
@@ -66,7 +72,13 @@ func completeSessionDirs(input, base string) ([]string, error) {
 			continue
 		}
 		info, err := os.Stat(filepath.Join(parent, entry.Name()))
-		if err != nil || !info.IsDir() {
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			if documents && info.Mode().IsRegular() && documentKind(entry.Name()) != docNone {
+				matches = append(matches, prefix+entry.Name())
+			}
 			continue
 		}
 		matches = append(matches, prefix+entry.Name()+separator)

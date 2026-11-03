@@ -2,6 +2,8 @@ package lammobile
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -119,4 +121,38 @@ func connectDemo() (*Client, error) {
 		return nil, err
 	}
 	return &Client{link: link}, nil
+}
+
+func TestDemoNewSessionHelpers(t *testing.T) {
+	// An earlier test leaves TMPDIR pointing at a removed directory.
+	root, err := os.MkdirTemp("/tmp", "lam-mobile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	t.Setenv("TMPDIR", root)
+	home := filepath.Join(root, "home")
+	os.Mkdir(home, 0o755)
+	t.Setenv("HOME", home)
+	os.Mkdir(filepath.Join(home, "projects"), 0o755)
+	c, err := connectDemo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got, err := c.Home(); err != nil || got != home {
+		t.Fatalf("Home = %q, %v", got, err)
+	}
+	if got, err := c.CompleteDir("~/pro", ""); err != nil || got != "~/projects/" {
+		t.Fatalf("CompleteDir = %q, %v", got, err)
+	}
+	if _, err := c.Launchers(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateSession("nonsense", ""); err == nil {
+		t.Fatal("an unknown agent was accepted")
+	}
+	if _, err := c.CreateSession("terminal", filepath.Join(home, "missing")); err == nil {
+		t.Fatal("a directory that does not exist was accepted")
+	}
 }
