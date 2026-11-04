@@ -61,6 +61,9 @@ const (
 )
 
 type guiApp struct {
+	copyMu              sync.Mutex
+	copyQueue           []string // text programs copied with OSC 52, for the next frame
+	copyHooked          bool
 	th                  guiTheme
 	win                 *app.Window
 	dirty               *dirtyFlag
@@ -528,6 +531,14 @@ func (g *guiApp) mainPane(cols, rows int) *embedded {
 	g.mu.Unlock()
 	if listed && total == 0 {
 		g.closeMain()
+		if g.emptyShell != nil && g.emptyShell.done.Load() {
+			// The shell was stopped or exited: stay open with nothing in it
+			// rather than showing a dead pane or starting another.
+			p := g.emptyShell
+			g.emptyShell = nil
+			g.mainView.attach(nil)
+			go disposeFallbackShell(p)
+		}
 		if g.emptyShell == nil && !g.emptyTried {
 			g.emptyTried = true
 			name := launcherSessionName("terminal", g.launchDir, nil)
@@ -724,6 +735,7 @@ func (g *guiApp) focusedView() *termView {
 }
 
 func (g *guiApp) layout(gtx layout.Context) layout.Dimensions {
+	g.flushProgramCopies(gtx)
 	g.pollConnect()
 	if g.autoConnect != "" && g.dlg.kind == dlgNone {
 		host := g.autoConnect
@@ -920,6 +932,9 @@ func (g *guiApp) layoutMain(gtx layout.Context) {
 			g.drawView(gtx, g.mainView, mr, g.focusedView() == g.mainView)
 		} else {
 			msg := "No session selected"
+			if g.listed && len(g.allSessions()) == 0 {
+				msg = "No sessions"
+			}
 			if g.listErr != "" {
 				msg = g.listErr
 			} else if g.message != "" && time.Now().Before(g.msgUntil) {
@@ -1703,4 +1718,26 @@ func hostOrNative(host string) string {
 		return "native"
 	}
 	return "ssh:" + host
+}
+
+// flushProgramCopies writes what programs copied with OSC 52 to the clipboard.
+func (g *guiApp) flushProgramCopies(gtx layout.Context) {
+	if !g.copyHooked {
+		g.copyHooked = true
+		hook := func(text string) {
+			g.copyMu.Lock()
+			g.copyQueue = append(g.copyQueue, text)
+			g.copyMu.Unlock()
+			g.wake()
+		}
+		programCopyHook.Store(&hook)
+	}
+	g.copyMu.Lock()
+	queue := g.copyQueue
+	g.copyQueue = nil
+	g.copyMu.Unlock()
+	for _, text := range queue {
+		gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(text))})
+		gtx.Execute(op.InvalidateCmd{}) // see copySelection
+	}
 }

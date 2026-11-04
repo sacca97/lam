@@ -637,11 +637,14 @@ func (h *hostSession) resizeLocked(cols, rows int) {
 	pty.Setsize(h.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 }
 
-// kill terminates the session's process group: SIGTERM, then SIGKILL after 2s.
-// Once the command exits, runHost cleans up and returns.
+// kill terminates the session's process group: SIGHUP and SIGTERM, then
+// SIGKILL after 2s. An interactive shell ignores SIGTERM but exits on SIGHUP,
+// which a closed terminal sends anyway; without it every shell waited out the
+// two seconds. Once the command exits, runHost cleans up and returns.
 func (h *hostSession) kill() {
 	h.killOnce.Do(func() {
 		pgid := h.cmd.Process.Pid
+		syscall.Kill(-pgid, syscall.SIGHUP)
 		syscall.Kill(-pgid, syscall.SIGTERM)
 		go func() {
 			select {

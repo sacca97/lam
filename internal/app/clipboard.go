@@ -7,8 +7,14 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// programCopyHook, when set, also receives what a program copies with OSC 52.
+// The window uses it to write the clipboard through its own toolkit, which is
+// what a mouse-selection copy does and is known to work on every system.
+var programCopyHook atomic.Pointer[func(text string)]
 
 type clipboardCommand struct {
 	name string

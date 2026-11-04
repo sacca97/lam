@@ -190,7 +190,12 @@ func newEmbedded(name string, shell bool, cwd string, cols, rows int, dirty *dir
 		},
 		// The emulator swallows clipboard writes; hand them to the machine
 		// running the UI, which is where the user is.
-		ClipboardWrite: func(text string) { go copyToSystemClipboard(text) },
+		ClipboardWrite: func(text string) {
+			if hook := programCopyHook.Load(); hook != nil {
+				(*hook)(text)
+			}
+			go copyToSystemClipboard(text)
+		},
 		ModeChanged: func(mode ansi.Mode, enabled bool) {
 			if mode == ansi.ModeBracketedPaste {
 				e.bracketedPaste.Store(enabled)

@@ -1046,6 +1046,13 @@ func (v *termView) copySelection(gtx layout.Context) bool {
 		return false
 	}
 	gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(text))})
+	// The write is carried out with the next frame, and an idle window draws
+	// none: the text then reached the clipboard only after something else
+	// (a paste, typically) woke the window.
+	gtx.Execute(op.InvalidateCmd{})
+	if guiMac {
+		go copyToSystemClipboard(text) // pbcopy as well, should the toolkit's write not land
+	}
 	return true
 }
 
