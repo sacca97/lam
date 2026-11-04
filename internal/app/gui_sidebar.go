@@ -72,7 +72,7 @@ func (g *guiApp) statusOf(s sessionInfo, now time.Time) (status string, col colo
 	}
 	switch {
 	case s.Unread:
-		return "needs you", g.th.Unread, age
+		return "unread", g.th.Unread, age
 	case s.Activity == "active":
 		return "working", g.th.Accent, age
 	}
@@ -132,25 +132,34 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	listErr := g.listErr
 	g.mu.Unlock()
 
-	// No heading: the sidebar is all search and sessions, from the top edge. The
-	// strip above the search still drags the window where lam draws its own title bar.
+	// No heading: the strip above the tabs drags the window where lam draws its
+	// own title bar.
 	top := gtx.Dp(10)
 	moveArea(gtx, image.Rect(0, 0, size.X, top))
 
+	// The machines, as tabs.
+	tabH := gtx.Dp(34)
+	g.layoutHostTabs(gtx, image.Rect(0, top, size.X, top+tabH), pad)
+
 	// Search, and the new session button.
 	fh := gtx.Dp(34)
-	fy := top
+	fy := top + tabH + gtx.Dp(8)
 	nb := image.Rect(size.X-pad-fh, fy, size.X-pad, fy+fh)
 	g.layoutSearch(gtx, image.Rect(pad, fy, nb.Min.X-gtx.Dp(6), fy+fh))
 	if g.ghostButton(gtx, "new", nb, "New session", true, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		iconPlus(gtx, c, float32(gtx.Dp(6)), float32(max(1, gtx.Dp(1.6))), col)
 	}) {
-		g.openNewSession()
+		g.openNewSessionOn(g.tabHost())
 	}
 
+	// How the list is grouped.
+	gy := fy + fh + gtx.Dp(8)
+	gh := gtx.Dp(24)
+	g.layoutGroupSwitch(gtx, image.Rect(pad, gy, size.X-pad, gy+gh))
+
 	// The list.
-	footer := gtx.Dp(46)
-	listArea := image.Rect(0, fy+fh+gtx.Dp(10), size.X, size.Y-footer)
+	footer := gtx.Dp(40)
+	listArea := image.Rect(0, gy+gh+gtx.Dp(6), size.X, size.Y-footer)
 	rows := g.cachedRows()
 	now := time.Now()
 	func() {
@@ -158,14 +167,14 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 		lg := gtx
 		lg.Constraints = layout.Exact(listArea.Size())
 		defer clip.Rect{Max: listArea.Size()}.Push(gtx.Ops).Pop()
-		if len(rows) <= 1 {
+		if len(rows) == 0 {
 			g.layoutEmptyList(lg, listErr, pad)
 			return
 		}
 		animate := false
 		g.nextAge = time.Time{}
 		g.list.Layout(lg, len(rows), func(gtx layout.Context, i int) layout.Dimensions {
-			if !rows[i].section && !rows[i].header && rows[i].s.Activity == "active" {
+			if !rows[i].header && !rows[i].stateHead && rows[i].s.Activity == "active" {
 				animate = true
 			}
 			return g.layoutRow(gtx, rows[i], pad, now)
@@ -180,61 +189,324 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 		}
 	}()
 
-	// Footer: settings and shortcuts.
+	// Footer: how many sessions are at work on every machine, settings and shortcuts.
 	paint.FillShape(gtx.Ops, g.th.Divider, clip.Rect{Min: image.Pt(0, size.Y-footer), Max: image.Pt(size.X, size.Y-footer+max(1, gtx.Dp(1)))}.Op())
 	b := gtx.Dp(30)
 	fcy := size.Y - footer/2
-	sr := image.Rect(pad, fcy-b/2, pad+b, fcy-b/2+b)
+	hr := image.Rect(size.X-pad-b, fcy-b/2, size.X-pad, fcy-b/2+b)
+	sr := hr.Sub(image.Pt(b+gtx.Dp(2), 0))
 	if g.ghostButton(gtx, "settings", sr, "Settings", false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		iconSliders(gtx, c, float32(gtx.Dp(7)), col)
 	}) {
 		g.dlg = dialog{kind: dlgSettings}
 	}
-	hr := sr.Add(image.Pt(b+gtx.Dp(2), 0))
 	if g.ghostButton(gtx, "help", hr, "Keyboard shortcuts", false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		iconKeyboard(gtx, c, float32(gtx.Dp(8)), col)
 	}) {
 		g.dlg = dialog{kind: dlgHelp}
 	}
-	// A newer release: a quiet button at the right end of the footer.
+	active, idle := 0, 0
+	for _, s := range g.allSessions() {
+		switch {
+		case s.Shell:
+		case s.Activity == "active":
+			active++
+		default:
+			idle++
+		}
+	}
+	x := pad + gtx.Dp(4)
+	dot := image.Pt(x+gtx.Dp(3), fcy)
+	paint.FillShape(gtx.Ops, g.th.Accent, clip.Ellipse{Min: dot.Sub(image.Pt(gtx.Dp(3), gtx.Dp(3))), Max: dot.Add(image.Pt(gtx.Dp(3), gtx.Dp(3)))}.Op(gtx.Ops))
+	x += gtx.Dp(12)
+	x += g.drawTextMid(gtx, image.Pt(x, fcy), g.th.TinySize, font.Normal, g.th.TextDim, fmt.Sprintf("%d active", active), 1<<20)
+	g.drawTextMid(gtx, image.Pt(x, fcy), g.th.TinySize, font.Normal, g.th.TextFaint, fmt.Sprintf("  ·  %d idle", idle), 1<<20)
+	// A newer release: a quiet button before the icons.
 	if tag, ok := g.upd.available(); ok {
-		chip := image.Pt(size.X-pad, fcy)
+		chip := image.Pt(sr.Min.X-gtx.Dp(8), fcy)
 		g.buttonStyled(gtx, "update-chip", "↑ "+tag, chip, true, false, false)
 		if g.clicked(gtx, "update-chip") {
 			g.openUpdate()
 		}
 	}
-	// Connecting to a host: the icon with its words, and the host's name once
-	// connected, so it is clear what this button is and where the sessions run.
-	cr := hr.Add(image.Pt(b+gtx.Dp(2), 0))
-	label, tip := "Connect", "Connect to a host  "+map[bool]string{true: "⌘O", false: "Ctrl+Shift+O"}[guiMac]
-	if g.remote {
-		_, host := g.mb.Remote()
-		label, tip = "Disconnect", "Disconnect from "+host+" (its sessions keep running)"
-	}
-	reserve := gtx.Dp(8)
-	if _, ok := g.upd.available(); ok {
-		reserve += gtx.Dp(72)
-	}
-	gl, tw, _ := g.shape(gtx, g.th.TinySize, font.Medium, label, max(gtx.Dp(30), size.X-cr.Min.X-pad-b-reserve))
-	cr.Max.X = cr.Min.X + b + tw + gtx.Dp(6)
-	if g.ghostButton(gtx, "connect", cr, tip, g.remote, func(gtx layout.Context, c image.Point, col color.NRGBA) {
-		if g.remote {
-			col = g.th.Accent
+}
+
+// sideTab is one machine in the tab strip.
+type sideTab struct {
+	host, label string
+	connected   bool // this machine, or the host connected now
+	unread      int
+}
+
+// sideTabs are this machine, the host connected now, and the hosts connected
+// to before.
+func (g *guiApp) sideTabs() []sideTab {
+	_, remote := g.mb.Remote()
+	unread := map[string]int{}
+	for _, s := range g.allSessions() {
+		if s.Unread {
+			unread[s.Host]++
 		}
-		iconServer(gtx, image.Pt(cr.Min.X+b/2, c.Y), float32(gtx.Dp(7)), col)
+	}
+	tabs := []sideTab{{label: g.hostLabel(), connected: true, unread: unread[""]}}
+	if remote != "" {
+		tabs = append(tabs, sideTab{host: remote, label: remote, connected: true, unread: unread[remote]})
+	}
+	for _, h := range g.settings.GUIHosts {
+		if h != remote {
+			tabs = append(tabs, sideTab{host: h, label: h})
+		}
+	}
+	return tabs
+}
+
+// layoutHostTabs draws the machines as tabs: click one to list its sessions,
+// a host not connected connects. The × disconnects, or forgets a host not
+// connected; the + connects to another.
+func (g *guiApp) layoutHostTabs(gtx layout.Context, r image.Rectangle, pad int) {
+	front := g.tabHost()
+	x := pad
+	room := r.Max.X - pad - gtx.Dp(28)
+	circle := func(c image.Point, rad int, col color.NRGBA) {
+		paint.FillShape(gtx.Ops, col, clip.Ellipse{Min: c.Sub(image.Pt(rad, rad)), Max: c.Add(image.Pt(rad, rad))}.Op(gtx.Ops))
+	}
+	// Tabs take the width their names need; one that does not fit shrinks a
+	// little, and those after it are left out (the + still connects anywhere).
+	// The connected machines come first, so they are the ones that stay.
+	var tabs []sideTab
+	var labelW []int
+	budget, used := room-pad, 0
+	for _, t := range g.sideTabs() {
+		chrome := gtx.Dp(20) + gtx.Dp(8) + gtx.Dp(1)
+		if t.unread > 0 {
+			chrome += gtx.Dp(22)
+		}
+		if t.host != "" {
+			chrome += gtx.Dp(16)
+		}
+		_, nat, _ := g.shape(gtx, g.th.SmallSize, font.Medium, t.label, gtx.Dp(96))
+		if left := budget - used - chrome; nat > left {
+			if left < gtx.Dp(48) {
+				break
+			}
+			nat = left
+		}
+		tabs, labelW = append(tabs, t), append(labelW, nat)
+		used += chrome + nat
+	}
+	for i, t := range tabs {
+		gl, tw, _ := g.shape(gtx, g.th.SmallSize, font.Medium, t.label, labelW[i]+1)
+		w := gtx.Dp(20) + tw + gtx.Dp(8)
+		if t.unread > 0 {
+			w += gtx.Dp(22)
+		}
+		if t.host != "" {
+			w += gtx.Dp(16)
+		}
+		tr := image.Rect(x, r.Min.Y, x+w, r.Max.Y)
+		x += w + gtx.Dp(1)
+		id := "tab-" + t.host
+		c := g.clickable(id)
+		if c.Clicked(gtx) {
+			if t.connected {
+				g.sideHost = t.host
+			} else if g.dlg.kind == dlgNone {
+				g.openConnect()
+				g.dlg.field.set(t.host)
+				g.startConnect(t.host)
+			}
+		}
+		active := t.connected && t.host == front
+		func() {
+			st := op.Offset(tr.Min).Push(gtx.Ops)
+			defer st.Pop()
+			cg := gtx
+			cg.Constraints = layout.Exact(tr.Size())
+			c.Layout(cg, func(gtx layout.Context) layout.Dimensions {
+				rr := clip.UniformRRect(image.Rectangle{Max: tr.Size()}, gtx.Dp(8))
+				switch {
+				case active:
+					paint.FillShape(gtx.Ops, g.th.Surface, rr.Op(gtx.Ops))
+					paint.FillShape(gtx.Ops, g.th.Border, clip.Stroke{Path: rr.Path(gtx.Ops), Width: float32(max(1, gtx.Dp(1)))}.Op())
+				case c.Hovered():
+					paint.FillShape(gtx.Ops, g.th.Hover, rr.Op(gtx.Ops))
+				}
+				pointer.CursorPointer.Add(gtx.Ops)
+				return layout.Dimensions{Size: tr.Size()}
+			})
+		}()
+		cy := (tr.Min.Y + tr.Max.Y) / 2
+		dotCol := g.th.TextFaint
+		if t.connected {
+			dotCol = g.th.Accent
+		}
+		circle(image.Pt(tr.Min.X+gtx.Dp(9), cy), gtx.Dp(3), dotCol)
+		col := g.th.TextFaint
+		switch {
+		case active:
+			col = g.th.Text
+		case t.connected:
+			col = g.th.TextDim
+		}
 		if len(gl) > 0 {
 			asc, desc := gl[0].Ascent.Ceil(), gl[0].Descent.Ceil()
-			g.paintGlyphs(gtx, gl, image.Pt(cr.Min.X+b-gtx.Dp(2), c.Y+(asc-desc)/2), col)
+			g.paintGlyphs(gtx, gl, image.Pt(tr.Min.X+gtx.Dp(18), cy+(asc-desc)/2), col)
 		}
-	}) {
-		if g.remote {
-			g.connID++
-			g.switchBackend(nil)
-		} else {
-			g.openConnect()
+		bx := tr.Min.X + gtx.Dp(18) + tw + gtx.Dp(5)
+		if t.unread > 0 {
+			br := image.Rect(bx, cy-gtx.Dp(8), bx+gtx.Dp(17), cy+gtx.Dp(8))
+			paint.FillShape(gtx.Ops, g.th.Unread, clip.UniformRRect(br, gtx.Dp(8)).Op(gtx.Ops))
+			g.drawTextCentered(gtx, br, g.th.TinySize, font.Bold, color.NRGBA{R: 0x1c, G: 0x0f, B: 0x0b, A: 0xff}, fmt.Sprint(t.unread))
+		}
+		if !t.connected {
+			if c.Hovered() {
+				g.tooltip(gtx, tr, "Connect to "+t.label)
+			}
+		}
+		if t.host != "" {
+			xr := image.Rect(tr.Max.X-gtx.Dp(17), cy-gtx.Dp(9), tr.Max.X-gtx.Dp(1), cy+gtx.Dp(9))
+			tip := "Disconnect from " + t.label + " (its sessions keep running)"
+			if !t.connected {
+				tip = "Forget " + t.label
+			}
+			if g.ghostButton(gtx, "tabx-"+t.host, xr, tip, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+				iconCross(gtx, c, float32(gtx.Dp(3)), float32(max(1, gtx.Dp(1.2))), col)
+			}) {
+				if t.connected {
+					g.connID++
+					g.switchBackend(nil)
+				} else {
+					g.forgetHost(t.host)
+				}
+			}
 		}
 	}
+	plus := image.Rect(r.Max.X-pad-gtx.Dp(28), r.Min.Y+gtx.Dp(3), r.Max.X-pad, r.Max.Y-gtx.Dp(3))
+	if g.ghostButton(gtx, "tab-add", plus, "Connect to a host  "+map[bool]string{true: "⌘O", false: "Ctrl+Shift+O"}[guiMac], false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+		iconPlus(gtx, c, float32(gtx.Dp(5)), float32(max(1, gtx.Dp(1.4))), col)
+	}) {
+		g.openConnect()
+	}
+}
+
+// layoutGroupSwitch is the choice between listing the sessions by state and by
+// folder.
+func (g *guiApp) layoutGroupSwitch(gtx layout.Context, r image.Rectangle) {
+	cy := (r.Min.Y + r.Max.Y) / 2
+	x := r.Min.X + gtx.Dp(2)
+	x += g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.Normal, g.th.TextFaint, "Group by", r.Dx()) + gtx.Dp(8)
+	type seg struct{ id, label, value string }
+	segs := []seg{{"grp-state", "State", "state"}, {"grp-folder", "Folder", "folder"}}
+	current := g.settings.GUIGroup
+	if current == "" {
+		current = "state"
+	}
+	widths := make([]int, len(segs))
+	total := 0
+	for i, sg := range segs {
+		_, tw, _ := g.shape(gtx, g.th.TinySize, font.Medium, sg.label, 1<<20)
+		widths[i] = tw + gtx.Dp(18)
+		total += widths[i]
+	}
+	box := image.Rect(x, r.Min.Y+gtx.Dp(1), x+total, r.Max.Y-gtx.Dp(1))
+	rr := clip.UniformRRect(box, gtx.Dp(7))
+	sx := box.Min.X
+	for i, sg := range segs {
+		sr := image.Rect(sx, box.Min.Y, sx+widths[i], box.Max.Y)
+		sx += widths[i]
+		c := g.clickable(sg.id)
+		if c.Clicked(gtx) && current != sg.value {
+			g.settings.GUIGroup = sg.value
+			saveSettings(g.settings)
+			g.rowsVer.Add(1)
+			current = sg.value
+		}
+		on := current == sg.value
+		func() {
+			st := op.Offset(sr.Min).Push(gtx.Ops)
+			defer st.Pop()
+			cg := gtx
+			cg.Constraints = layout.Exact(sr.Size())
+			c.Layout(cg, func(gtx layout.Context) layout.Dimensions {
+				switch {
+				case on:
+					paint.FillShape(gtx.Ops, g.th.Selected, clip.UniformRRect(image.Rectangle{Max: sr.Size()}, gtx.Dp(6)).Op(gtx.Ops))
+				case c.Hovered():
+					paint.FillShape(gtx.Ops, g.th.Hover, clip.UniformRRect(image.Rectangle{Max: sr.Size()}, gtx.Dp(6)).Op(gtx.Ops))
+				}
+				pointer.CursorPointer.Add(gtx.Ops)
+				return layout.Dimensions{Size: sr.Size()}
+			})
+		}()
+		col := g.th.TextFaint
+		if on {
+			col = g.th.Text
+		}
+		g.drawTextCentered(gtx, sr, g.th.TinySize, font.Medium, col, sg.label)
+	}
+	paint.FillShape(gtx.Ops, g.th.Border, clip.Stroke{Path: rr.Path(gtx.Ops), Width: float32(max(1, gtx.Dp(1)))}.Op())
+}
+
+// layoutStateHead is the heading over the sessions in one state.
+func (g *guiApp) layoutStateHead(gtx layout.Context, r guiRow, pad int) layout.Dimensions {
+	w := gtx.Constraints.Max.X
+	gap := gtx.Dp(8)
+	if r.first {
+		gap = 0
+	}
+	h := gtx.Dp(26)
+	cy := gap + h/2 + gtx.Dp(2)
+	col := g.th.TextFaint
+	switch r.state {
+	case stateUnread:
+		col = g.th.Unread
+	case stateWorking:
+		col = g.th.Accent
+	}
+	x := pad + gtx.Dp(6)
+	dot := image.Pt(x+gtx.Dp(3), cy)
+	paint.FillShape(gtx.Ops, col, clip.Ellipse{Min: dot.Sub(image.Pt(gtx.Dp(3), gtx.Dp(3))), Max: dot.Add(image.Pt(gtx.Dp(3), gtx.Dp(3)))}.Op(gtx.Ops))
+	x += gtx.Dp(14)
+	x += g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.Bold, col, strings.ToUpper(r.label), w) + gtx.Dp(8)
+	count := fmt.Sprint(r.count)
+	_, cw, _ := g.shape(gtx, g.th.TinySize, font.Normal, count, 1<<20)
+	right := w - pad - gtx.Dp(6)
+	g.drawTextRightMid(gtx, image.Pt(right, cy), g.th.TinySize, g.th.TextFaint, count)
+	if end := right - cw - gtx.Dp(8); end > x {
+		paint.FillShape(gtx.Ops, g.th.Divider, clip.Rect{Min: image.Pt(x, cy), Max: image.Pt(end, cy+max(1, gtx.Dp(1)))}.Op())
+	}
+	return layout.Dimensions{Size: image.Pt(w, gap+h)}
+}
+
+// agentBadge draws the small square that says which program a session runs.
+func (g *guiApp) agentBadge(gtx layout.Context, r image.Rectangle, s sessionInfo) {
+	letter, tint := "?", g.th.TextDim
+	switch providerName(s) {
+	case "Claude Code":
+		letter, tint = "C", color.NRGBA{R: 0xd9, G: 0x77, B: 0x57, A: 0xff}
+	case "Codex":
+		letter, tint = "X", color.NRGBA{R: 0x7a, G: 0xa2, B: 0xf7, A: 0xff}
+	case "opencode":
+		letter, tint = "O", color.NRGBA{R: 0x7d, G: 0xd3, B: 0xc0, A: 0xff}
+	case "pi":
+		letter, tint = "π", color.NRGBA{R: 0xc3, G: 0xa6, B: 0xff, A: 0xff}
+	case "Oh My Pi":
+		letter, tint = "Ω", color.NRGBA{R: 0xe0, G: 0xa3, B: 0xff, A: 0xff}
+	case "Antigravity":
+		letter, tint = "A", color.NRGBA{R: 0xf2, G: 0xc4, B: 0x6d, A: 0xff}
+	case "Gemini":
+		letter, tint = "G", color.NRGBA{R: 0x8a, G: 0xb4, B: 0xf8, A: 0xff}
+	case "Shell":
+		letter = "$"
+	default:
+		if name := providerName(s); name != "" {
+			letter = strings.ToUpper(string([]rune(name)[:1]))
+		}
+	}
+	bg := tint
+	bg.A = 0x2a
+	paint.FillShape(gtx.Ops, bg, clip.UniformRRect(r, gtx.Dp(6)).Op(gtx.Ops))
+	g.drawTextCentered(gtx, r, g.th.TinySize, font.Bold, tint, letter)
 }
 
 func (g *guiApp) layoutEmptyList(gtx layout.Context, listErr string, pad int) {
@@ -394,8 +666,8 @@ func (g *guiApp) tooltip(gtx layout.Context, r image.Rectangle, text string) {
 
 func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time) layout.Dimensions {
 	w := gtx.Constraints.Max.X
-	if r.section {
-		return g.layoutSection(gtx, r, pad)
+	if r.stateHead {
+		return g.layoutStateHead(gtx, r, pad)
 	}
 	if r.header {
 		return g.layoutGroupHeader(gtx, r, pad)
@@ -454,14 +726,12 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 		return layout.Dimensions{Size: image.Pt(w, itemH)}
 	})
 
+	// One line: who it is, its name and where it is, then how long and its dot.
 	cy := itemH / 2
-	line1, line2 := cy-gtx.Dp(8), cy+gtx.Dp(8)
-	dotX := inner.Min.X + gtx.Dp(16)
-	g.statusDot(gtx, image.Pt(dotX, line1), s, now)
-	x := dotX + gtx.Dp(14)
+	badge := image.Rect(inner.Min.X+gtx.Dp(8), cy-gtx.Dp(10), inner.Min.X+gtx.Dp(28), cy+gtx.Dp(10))
+	g.agentBadge(gtx, badge, s)
+	x := badge.Max.X + gtx.Dp(8)
 	right := inner.Max.X - gtx.Dp(10)
-
-	status, scol, age := g.statusOf(s, now)
 	if showMore {
 		mr := image.Rect(right-gtx.Dp(26), cy-gtx.Dp(12), right+gtx.Dp(2), cy+gtx.Dp(12))
 		if g.ghostButton(gtx, "more-"+s.Name, mr, "", false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
@@ -474,28 +744,34 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 			g.moreNext = s.Name
 		}
 		right = mr.Min.X - gtx.Dp(4)
-	} else if age != "" && status != "" {
-		_, aw, _ := g.shape(gtx, g.th.TinySize, font.Normal, age, 1<<20)
-		g.drawTextRightMid(gtx, image.Pt(right, line1), g.th.TinySize, g.th.TextFaint, age)
-		right -= aw + gtx.Dp(8)
+	} else {
+		g.statusDot(gtx, image.Pt(right-gtx.Dp(3), cy), s, now)
+		right -= gtx.Dp(16)
+		if _, _, age := g.statusOf(s, now); age != "" {
+			_, aw, _ := g.shape(gtx, g.th.TinySize, font.Normal, age, 1<<20)
+			g.drawTextRightMid(gtx, image.Pt(right, cy), g.th.TinySize, g.th.TextFaint, age)
+			right -= aw + gtx.Dp(8)
+		}
 	}
 
-	label := sessionLabel(s)
-	if g.collapsed[groupKey(s)] {
-		label = shortName(s.Name)
+	byFolder := g.settings.GUIGroup == "folder"
+	label := shortName(s.Name)
+	if byFolder && !g.collapsed[groupKey(s)] {
+		label = sessionLabel(s)
 	}
 	nameCol, weight := g.th.TextDim, font.Medium
-	if selected {
+	if selected || s.Unread || s.Activity == "active" {
 		nameCol = g.th.Text
 	}
-	g.drawTextMid(gtx, image.Pt(x, line1), g.th.UISize, weight, nameCol, label, right-x)
-	// Second line: the agent, then its state, colored only when it matters.
-	sub := providerName(s)
-	sx := x
-	sx += g.drawTextMid(gtx, image.Pt(sx, line2), g.th.TinySize, font.Normal, g.th.TextFaint, sub, inner.Max.X-gtx.Dp(10)-sx)
-	if status != "" {
-		sx += g.drawTextMid(gtx, image.Pt(sx, line2), g.th.TinySize, font.Normal, g.th.TextFaint, "  ·  ", inner.Max.X-sx)
-		g.drawTextMid(gtx, image.Pt(sx, line2), g.th.TinySize, font.Medium, scol, status, inner.Max.X-gtx.Dp(10)-sx)
+	nameW := g.drawTextMid(gtx, image.Pt(x, cy), g.th.UISize, weight, nameCol, label, right-x)
+	// Under a state heading the folder tells the sessions apart; under a folder
+	// heading it is the program.
+	note := sessionProject(s)
+	if byFolder {
+		note = providerName(s)
+	}
+	if rest := right - x - nameW - gtx.Dp(8); rest > gtx.Dp(28) {
+		g.drawTextMid(gtx, image.Pt(x+nameW+gtx.Dp(8), cy), g.th.TinySize, font.Normal, g.th.TextFaint, note, rest)
 	}
 
 	pt := pointer.PassOp{}.Push(gtx.Ops)
@@ -534,87 +810,14 @@ func (g *guiApp) statusDot(gtx layout.Context, c image.Point, s sessionInfo, now
 	}
 }
 
-// layoutGroupHeader draws a project heading: a click folds it, + starts a
-// session in that folder.
-// layoutSection is the heading over one machine's sessions: whether it is
-// this one or a remote host, which, and for a remote one the state of the link.
-func (g *guiApp) layoutSection(gtx layout.Context, r guiRow, pad int) layout.Dimensions {
-	w := gtx.Constraints.Max.X
-	gap := 0
-	if r.host != "" {
-		// The break between two machines is heavier than the one between two
-		// projects: more air, and a thicker rule across the whole sidebar in the
-		// border colour.
-		gap = gtx.Dp(20)
-		rule := max(2, gtx.Dp(2))
-		paint.FillShape(gtx.Ops, g.th.Border, clip.Rect{Min: image.Pt(0, gap/2-rule/2), Max: image.Pt(w, gap/2-rule/2+rule)}.Op())
-	}
-	h := gtx.Dp(30)
-	band := image.Rect(pad-gtx.Dp(2), gap, w-pad+gtx.Dp(2), gap+h)
-	paint.FillShape(gtx.Ops, g.th.Hover, clip.UniformRRect(band, gtx.Dp(g.th.ItemRadius)).Op(gtx.Ops))
-	cy := gap + h/2
-
-	kind, detail, detailCol := "LOCAL", r.label, g.th.TextFaint
-	iconCol := g.th.TextDim
-	if r.saved {
-		kind, detailCol, iconCol = "REMOTE", g.th.TextDim, g.th.TextFaint
-	} else if r.host != "" {
-		kind = "REMOTE"
-		if st := currentLinkStatus(); !st.Up {
-			detail, detailCol, iconCol = linkStatusText(st, time.Now()), g.th.Unread, g.th.Unread
-			gtx.Execute(op.InvalidateCmd{At: time.Now().Add(time.Second)})
-		} else {
-			iconCol = g.th.Accent
-			if v := g.mb.remoteVersion(); v != "" {
-				detail += " · " + v
-			}
-		}
-	}
-	x := band.Min.X + gtx.Dp(14)
-	if r.host != "" {
-		iconServer(gtx, image.Pt(x, cy), float32(gtx.Dp(6)), iconCol)
-	} else {
-		iconTerminal(gtx, image.Pt(x, cy), float32(gtx.Dp(6)), iconCol)
-	}
-	x += gtx.Dp(14)
-	br := image.Rect(band.Max.X-gtx.Dp(28), cy-gtx.Dp(12), band.Max.X-gtx.Dp(4), cy+gtx.Dp(12))
-	if r.saved {
-		// A host connected to before: kept here, not connected, with a way back.
-		forget := br
-		if g.ghostButton(gtx, "forget-"+r.host, forget, "Forget "+r.label, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
-			iconCross(gtx, c, float32(gtx.Dp(3.5)), float32(max(1, gtx.Dp(1.2))), col)
-		}) {
-			g.forgetHost(r.host)
-		}
-		gl, tw, _ := g.shape(gtx, g.th.TinySize, font.Medium, "Connect", w)
-		cr := image.Rect(forget.Min.X-gtx.Dp(6)-tw-gtx.Dp(16), cy-gtx.Dp(12), forget.Min.X-gtx.Dp(2), cy+gtx.Dp(12))
-		if g.ghostButtonTinted(gtx, "connect-"+r.host, cr, "Connect to "+r.label, true, color.NRGBA{}, func(gtx layout.Context, c image.Point, col color.NRGBA) {
-			if len(gl) > 0 {
-				asc, desc := gl[0].Ascent.Ceil(), gl[0].Descent.Ceil()
-				g.paintGlyphs(gtx, gl, image.Pt(c.X-tw/2, c.Y+(asc-desc)/2), g.th.Accent)
-			}
-		}) {
-			g.openConnect()
-			g.dlg.field.set(r.host)
-			g.startConnect(r.host)
-		}
-		br = cr
-	} else if g.ghostButton(gtx, "new-on-"+r.host, br, "New session on "+r.label, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
-		iconPlus(gtx, c, float32(gtx.Dp(4.5)), float32(max(1, gtx.Dp(1.4))), col)
-	}) {
-		g.openNewSessionOn(r.host)
-	}
-	x += g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.Bold, g.th.Text, kind, w) + gtx.Dp(8)
-	g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.Normal, detailCol, detail, br.Min.X-x-gtx.Dp(4))
-	return layout.Dimensions{Size: image.Pt(w, gap+h+gtx.Dp(2))}
-}
-
 // forgetHost drops a saved host from the sidebar.
 func (g *guiApp) forgetHost(host string) {
 	g.settings.GUIHosts = slices.DeleteFunc(slices.Clone(g.settings.GUIHosts), func(h string) bool { return h == host })
 	saveSettings(g.settings)
 }
 
+// layoutGroupHeader draws a project heading: a click folds it, + starts a
+// session in that folder.
 func (g *guiApp) layoutGroupHeader(gtx layout.Context, r guiRow, pad int) layout.Dimensions {
 	w := gtx.Constraints.Max.X
 	// Each project after the first in its section is set off by a rule and

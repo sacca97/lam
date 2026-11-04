@@ -13,9 +13,9 @@ import (
 	"gioui.org/io/pointer"
 )
 
-// The window lists this machine's sessions and the connected host's under
-// their own headings, even when the same folder is open on both.
-func TestGUISidebarHasLocalAndRemoteSections(t *testing.T) {
+// The sidebar lists one machine's sessions at a time, the one whose tab is in
+// front, even when the same folder is open on both.
+func TestGUISidebarShowsOneMachineAtATime(t *testing.T) {
 	e := testPane(t, 100, 30)
 	g := newTestApp(t, e)
 	g.mb.SetRemote(&fakeBackend{name: "ssh:build-box"})
@@ -25,24 +25,41 @@ func TestGUISidebarHasLocalAndRemoteSections(t *testing.T) {
 		sessionInfo{Name: "build-box/shell-data", Host: "build-box", CWD: "/srv/data", Shell: true, Activity: "quiet"},
 	)
 	g.sessions = sortedCopy(g.sessions)
-
-	var sections []string
+	sessionsIn := func(rows []guiRow) (names []string) {
+		for _, r := range rows {
+			if !r.header && !r.stateHead {
+				names = append(names, r.s.Name)
+			}
+		}
+		return
+	}
+	g.sideHost = ""
+	if got := sessionsIn(g.sidebarRows(g.sessions)); len(got) != 5 {
+		t.Fatalf("this machine's sessions = %v", got)
+	}
+	g.sideHost = "build-box"
+	if got := sessionsIn(g.sidebarRows(g.sessions)); len(got) != 2 || got[0] != "build-box/claude-api" && got[1] != "build-box/claude-api" {
+		t.Fatalf("the host's sessions = %v", got)
+	}
+	// By folder there are headings for the folders on that machine only.
+	g.settings.GUIGroup = "folder"
 	headers := 0
 	for _, r := range g.sidebarRows(g.sessions) {
-		switch {
-		case r.section:
-			sections = append(sections, r.host)
-		case r.header:
+		if r.header {
 			headers++
 		}
 	}
-	if len(sections) != 2 || sections[0] != "" || sections[1] != "build-box" {
-		t.Fatalf("sections = %q", sections)
-	}
-	if headers != 5 { // api, lam, notes here; api, data there
+	if headers != 2 { // api, data
 		t.Fatalf("project headings = %d", headers)
 	}
+	// A host that is no longer connected falls back to this machine.
+	g.mb.SetRemote(nil)
+	if g.tabHost() != "" {
+		t.Fatalf("tab host = %q after disconnecting", g.tabHost())
+	}
 
+	g.mb.SetRemote(&fakeBackend{name: "ssh:build-box"})
+	g.sideHost = "build-box"
 	img := renderGUI(t, g, 1240, 720, 1)
 	dir := os.Getenv("GUI_SHOT_DIR")
 	if dir == "" {
@@ -51,6 +68,23 @@ func TestGUISidebarHasLocalAndRemoteSections(t *testing.T) {
 	f, _ := os.Create(dir + "/gui-sections.png")
 	png.Encode(f, img)
 	f.Close()
+}
+
+// By state the sessions are in three groups, unread first, and the newest
+// change first within each.
+func TestGUISidebarGroupsByState(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.settings.GUIGroup = "state"
+	var heads []string
+	for _, r := range g.sidebarRows(g.sessions) {
+		if r.stateHead {
+			heads = append(heads, r.label)
+		}
+	}
+	if len(heads) != 3 || heads[0] != "Unread" || heads[1] != "Working" || heads[2] != "Idle" {
+		t.Fatalf("state headings = %v", heads)
+	}
 }
 
 func sortedCopy(list []sessionInfo) []sessionInfo {
@@ -82,14 +116,15 @@ func TestGUIRowMenuButtonStaysUnderThePointer(t *testing.T) {
 		}
 		d.frame()
 	}
-	move(100, 256) // over the selected row: the dots appear
-	move(236, 256) // onto the dots
-	move(237, 257) // and a little more, as a hand does
+	// By state: the selected session leads the working ones.
+	move(100, 235) // over the selected row: the dots appear
+	move(236, 235) // onto the dots
+	move(237, 236) // and a little more, as a hand does
 	dots := g.clickable("more-claude-lam")
 	if !dots.Hovered() {
 		t.Fatal("the dots did not get the pointer")
 	}
-	p := f32.Pt(237, 257)
+	p := f32.Pt(237, 236)
 	d.router.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p, Time: at + time.Millisecond},
 		pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: at + 2*time.Millisecond})
 	d.frame()
@@ -105,6 +140,7 @@ func TestGUIRowMenuButtonStaysUnderThePointer(t *testing.T) {
 func TestGUIProjectPlusStaysUnderThePointer(t *testing.T) {
 	e := testPane(t, 80, 24)
 	g := newTestApp(t, e)
+	g.settings.GUIGroup = "folder"
 	d := &guiDriver{t: t, g: g}
 	d.frame()
 	d.frame()
@@ -117,22 +153,27 @@ func TestGUIProjectPlusStaysUnderThePointer(t *testing.T) {
 		}
 		d.frame()
 	}
-	move(100, 223) // over the heading of the second project: its + appears
+	// Over the heading of a project its + appears: find the heading.
 	var id string
-	for k := range g.buttons {
-		if strings.HasPrefix(k, "new-in-") {
-			id = k
+	var y float32
+	for y = 130; y < 420 && id == ""; y += 2 {
+		move(100, y)
+		for k := range g.buttons {
+			if strings.HasPrefix(k, "new-in-") {
+				id = k
+			}
 		}
 	}
 	if id == "" {
 		t.Fatal("the + did not appear on the heading")
 	}
-	move(226, 225) // onto the +
-	move(227, 226) // and a little more
+	y -= 2
+	move(226, y+2) // onto the +
+	move(227, y+3) // and a little more
 	if !g.clickable(id).Hovered() {
 		t.Fatal("the + did not get the pointer")
 	}
-	p := f32.Pt(227, 226)
+	p := f32.Pt(227, y+3)
 	d.router.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p, Time: at + time.Millisecond},
 		pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: at + 2*time.Millisecond})
 	d.frame()
@@ -142,16 +183,16 @@ func TestGUIProjectPlusStaysUnderThePointer(t *testing.T) {
 	}
 }
 
-// Hosts connected to before stay in the sidebar, not connected, with a way
-// back, until they are forgotten.
+// Hosts connected to before stay as tabs, not connected, until they are
+// forgotten.
 func TestSidebarKeepsSavedHosts(t *testing.T) {
 	e := testPane(t, 100, 30)
 	g := newTestApp(t, e)
 	g.settings.GUIHosts = []string{"fedora", "lab-box"}
 	saved := func() (names []string) {
-		for _, r := range g.sidebarRows(filteredSessions(g.allSessions(), "")) {
-			if r.section && r.saved {
-				names = append(names, r.label)
+		for _, tab := range g.sideTabs() {
+			if !tab.connected {
+				names = append(names, tab.label)
 			}
 		}
 		return
@@ -165,5 +206,49 @@ func TestSidebarKeepsSavedHosts(t *testing.T) {
 	}
 	if _, err := g.launchersOn("lab-box"); err == nil {
 		t.Fatal("agents of a host that is not connected were listed")
+	}
+}
+
+// Selecting an unread session reads it, and it stays under Unread until
+// another is selected, so stepping with the keys does not skip a neighbour.
+func TestGUISidebarStepsThroughUnreadWithoutSkipping(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.settings.GUIGroup = "state"
+	g.mu.Lock()
+	g.sessions = []sessionInfo{
+		{Name: "a", CWD: "/x/a", Command: "claude", Unread: true},
+		{Name: "b", CWD: "/x/b", Command: "claude", Unread: true},
+		{Name: "c", CWD: "/x/c", Command: "claude"},
+	}
+	g.mu.Unlock()
+	g.rowsVer.Add(1)
+	order := func() (names []string) {
+		for _, r := range g.cachedRows() {
+			if !r.header && !r.stateHead {
+				names = append(names, r.s.Name)
+			}
+		}
+		return
+	}
+	g.selectSession("a")
+	if got := order(); len(got) != 3 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("order after reading a: %v", got)
+	}
+	g.stepSession(1)
+	if g.selected != "b" {
+		t.Fatalf("next from a went to %q, not b", g.selected)
+	}
+	// Then it goes to the row under b, wherever a settled.
+	before := order()
+	below := ""
+	for i, n := range before {
+		if n == "b" {
+			below = before[(i+1)%len(before)]
+		}
+	}
+	g.stepSession(1)
+	if g.selected != below {
+		t.Fatalf("next from b went to %q, the row under it is %q (%v)", g.selected, below, before)
 	}
 }

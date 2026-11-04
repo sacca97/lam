@@ -102,7 +102,7 @@ func darkGUITheme() guiTheme {
 			rgb(0x82c4ff), rgb(0xd99cf0), rgb(0x7fd4de), rgb(0xf3f4f6),
 		},
 		SidebarW:   268,
-		ItemH:      40,
+		ItemH:      34,
 		ItemRadius: 7,
 		HeaderH:    46,
 		Pad:        12,

@@ -137,9 +137,11 @@ type guiApp struct {
 	lastMods  key.Modifiers
 	skipEdits bool // drop typed text until the next key press
 	hideSide  bool
-	sideTag   bool // sidebar edge drag
-	splitTag  bool // terminal divider drag
-	dragging  int  // 0 none, 1 sidebar edge, 2 divider
+	sideHost  string // the machine whose sessions the sidebar lists; "" is this one
+	holdName  string // a session read by selecting it stays under Unread until another is selected
+	sideTag   bool   // sidebar edge drag
+	splitTag  bool   // terminal divider drag
+	dragging  int    // 0 none, 1 sidebar edge, 2 divider
 	lastEdge  time.Time
 	split     struct {
 		body  image.Rectangle // the main area's panes, in its own coordinates
@@ -481,13 +483,23 @@ func (g *guiApp) selectSession(name string) {
 		return
 	}
 	g.doc = nil // the session comes to the front; the documents stay as tabs
+	g.sideHost = hostOfName(name)
 	g.mu.Lock()
+	hold := ""
+	if name == g.selected {
+		hold = g.holdName
+	}
 	g.selected = name
 	for i := range g.sessions {
 		if g.sessions[i].Name == name && g.sessions[i].Unread {
 			g.sessions[i].Unread = false
+			hold = name // it stays where it was, so the list does not move under the pointer or the keys
 			g.rowsVer.Add(1)
 		}
+	}
+	if hold != g.holdName {
+		g.holdName = hold
+		g.rowsVer.Add(1)
 	}
 	g.mu.Unlock()
 	if g.focus == focusTerminal {
@@ -498,7 +510,12 @@ func (g *guiApp) selectSession(name string) {
 }
 
 func (g *guiApp) stepSession(step int) {
-	list := g.visible()
+	var list []sessionInfo
+	for _, r := range g.cachedRows() {
+		if !r.header && !r.stateHead {
+			list = append(list, r.s)
+		}
+	}
 	if len(list) == 0 {
 		return
 	}
@@ -507,7 +524,7 @@ func (g *guiApp) stepSession(step int) {
 		g.selectSession(list[0].Name)
 		return
 	}
-	g.selectSession(list[nextSession(list, i, step, g.collapsed)].Name)
+	g.selectSession(list[(i+step+len(list))%len(list)].Name)
 }
 
 func (g *guiApp) toggleProject(cwd string) {
@@ -1462,16 +1479,16 @@ func (g *guiApp) filterKey(ev key.Event) {
 
 // guiRow is one line of the session list: a project heading or a session.
 type guiRow struct {
-	section bool // the heading over one machine's sessions
-	saved   bool // a section for a host connected to before, and not connected now
-	header  bool
-	host    string // the machine, for a section or a project heading
-	first   bool   // a project heading right under its section heading
-	cwd     string
-	label   string
-	count   int
-	folded  bool
-	s       sessionInfo
+	stateHead bool // the heading over the sessions in one state; state says which
+	state     int
+	header    bool
+	host      string // the machine, for a project heading
+	first     bool   // a project heading right under its section heading
+	cwd       string
+	label     string
+	count     int
+	folded    bool
+	s         sessionInfo
 }
 
 // rowCache remembers the built sidebar rows until something they depend on
@@ -1498,7 +1515,7 @@ func (g *guiApp) cachedRows() []guiRow {
 		first = &all[0]
 	}
 	_, rhost := g.mb.Remote()
-	host, ver := g.hostLabel()+"|"+rhost+"|"+strings.Join(g.settings.GUIHosts, ","), g.rowsVer.Load()
+	host, ver := g.hostLabel()+"|"+rhost+"|"+g.tabHost()+"|"+g.settings.GUIGroup, g.rowsVer.Load()
 	if c.valid && c.first == first && c.n == len(all) && c.filter == g.filter && c.selected == g.selected &&
 		c.host == host && c.ver == ver && c.seenCollapse == c.collapsedVer {
 		return c.rows
@@ -1509,39 +1526,94 @@ func (g *guiApp) cachedRows() []guiRow {
 	return c.rows
 }
 
-func (g *guiApp) sidebarRows(list []sessionInfo) []guiRow {
-	selected := slices.IndexFunc(list, func(s sessionInfo) bool { return s.Name == g.selected })
-	_, remote := g.mb.Remote()
-	rows := []guiRow{{section: true, label: g.hostLabel()}}
-	remoteShown, afterSection := false, true
-	showRemote := func() {
-		rows = append(rows, guiRow{section: true, host: remote, label: remote})
-		remoteShown = true
+// sidebar states, in the order they are listed.
+const (
+	stateUnread = iota
+	stateWorking
+	stateIdle
+)
+
+func sidebarState(s sessionInfo) int {
+	switch {
+	case s.Unread:
+		return stateUnread
+	case s.Activity == "active":
+		return stateWorking
 	}
+	return stateIdle
+}
+
+var stateNames = [...]string{"Unread", "Working", "Idle"} // Unread: finished, and not looked at yet
+
+// tabHost is the machine the sidebar shows: "" for this one. A host that is
+// no longer connected falls back to this machine.
+func (g *guiApp) tabHost() string {
+	if g.sideHost != "" {
+		if r, h := g.mb.Remote(); r != nil && h == g.sideHost {
+			return h
+		}
+	}
+	return ""
+}
+
+// sidebarRows lists the sessions of the machine in front, grouped by state or
+// by folder.
+func (g *guiApp) sidebarRows(list []sessionInfo) []guiRow {
+	host := g.tabHost()
+	var here []sessionInfo
+	for _, s := range list {
+		if s.Host == host {
+			here = append(here, s)
+		}
+	}
+	if g.settings.GUIGroup == "folder" {
+		return g.folderRows(here)
+	}
+	return g.stateRows(here)
+}
+
+func (g *guiApp) folderRows(list []sessionInfo) []guiRow {
+	selected := slices.IndexFunc(list, func(s sessionInfo) bool { return s.Name == g.selected })
+	var rows []guiRow
+	afterTop := true
 	for _, r := range buildSidebarRows(list, false, g.collapsed, selected) {
-		host := r.host
-		if !r.header {
-			host = list[r.session].Host
-		}
-		if host != "" && !remoteShown {
-			showRemote()
-			afterSection = true
-		}
 		if r.header {
-			rows = append(rows, guiRow{header: true, first: afterSection, cwd: r.cwd, host: r.host, label: r.label, count: r.count, folded: r.collapsed})
-			afterSection = false
+			rows = append(rows, guiRow{header: true, first: afterTop, cwd: r.cwd, host: r.host, label: r.label, count: r.count, folded: r.collapsed})
+			afterTop = false
 		} else {
 			rows = append(rows, guiRow{s: list[r.session]})
 		}
 	}
-	if remote != "" && !remoteShown {
-		showRemote()
+	return rows
+}
+
+func (g *guiApp) stateRows(list []sessionInfo) []guiRow {
+	var buckets [len(stateNames)][]sessionInfo
+	g.mu.Lock()
+	hold := g.holdName
+	g.mu.Unlock()
+	for _, s := range list {
+		st := sidebarState(s)
+		if s.Name == hold && st == stateIdle {
+			st = stateUnread // read by selecting it: it stays until another is selected, or it works again
+		}
+		buckets[st] = append(buckets[st], s)
 	}
-	if g.filter == "" {
-		for _, h := range g.settings.GUIHosts {
-			if h != remote {
-				rows = append(rows, guiRow{section: true, saved: true, host: h, label: h})
-			}
+	g.mu.Lock()
+	since := func(s sessionInfo) time.Time { return g.statusSince[s.Name] }
+	for _, b := range buckets {
+		// The ones that changed most recently first.
+		slices.SortStableFunc(b, func(x, y sessionInfo) int { return since(y).Compare(since(x)) })
+	}
+	g.mu.Unlock()
+	var rows []guiRow
+	for st, b := range buckets {
+		if len(b) == 0 {
+			continue
+		}
+		rows = append(rows, guiRow{stateHead: true, state: st, label: stateNames[st], count: len(b), first: len(rows) == 0})
+		for _, s := range b {
+			rows = append(rows, guiRow{s: s})
 		}
 	}
 	return rows

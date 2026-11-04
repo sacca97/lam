@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"slices"
 	"strings"
 	"time"
 
@@ -889,8 +890,10 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	// Content height, to centre the card.
 	contentH := len(body) * lineH
 	switch d.kind {
-	case dlgRename, dlgConnect:
+	case dlgRename:
 		contentH += gtx.Dp(44)
+	case dlgConnect:
+		contentH += gtx.Dp(44) + g.savedHostsHeight(gtx, d.busy)
 	case dlgOpenDoc:
 		d.pick.visible = min(9, max(3, (size.Y-gtx.Dp(370))/gtx.Dp(docPickRowDp)))
 		contentH += gtx.Dp(48) + gtx.Dp(30) + d.pick.visible*gtx.Dp(docPickRowDp) + gtx.Dp(8)
@@ -965,6 +968,7 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 		}
 		g.drawField(gtx, image.Rect(pad, y, pad+inner, y+gtx.Dp(36)), &d.field, hint)
 		y += gtx.Dp(44)
+		y += g.layoutSavedHosts(gtx, pad, y, inner)
 	case dlgAsk:
 		if !d.ask.yesNo {
 			d.field.secret = true
@@ -1250,4 +1254,59 @@ func savedPasswordsNoun() string {
 		return fmt.Sprintf("all %d saved passwords", n)
 	}
 	return "the saved password"
+}
+
+const maxSavedHostRows = 6
+
+// savedHostsHeight is the room the saved hosts take in the connect dialog.
+func (g *guiApp) savedHostsHeight(gtx layout.Context, busy bool) int {
+	n := min(len(g.settings.GUIHosts), maxSavedHostRows)
+	if busy || n == 0 {
+		return 0
+	}
+	return gtx.Dp(26) + n*gtx.Dp(34)
+}
+
+// layoutSavedHosts lists the hosts connected to before in the connect dialog:
+// a click connects, the × forgets. It is also the way to reach a host whose
+// tab did not fit in the sidebar.
+func (g *guiApp) layoutSavedHosts(gtx layout.Context, pad, y, inner int) int {
+	total := g.savedHostsHeight(gtx, g.dlg.busy)
+	if total == 0 {
+		return 0
+	}
+	g.drawText(gtx, image.Pt(pad, y+gtx.Dp(4)), g.th.TinySize, font.Bold, g.th.TextFaint, "SAVED HOSTS", inner)
+	y0 := y + gtx.Dp(26)
+	for i, host := range slices.Clone(g.settings.GUIHosts[:min(len(g.settings.GUIHosts), maxSavedHostRows)]) {
+		r := image.Rect(pad, y0+i*gtx.Dp(34), pad+inner, y0+i*gtx.Dp(34)+gtx.Dp(32))
+		c := g.clickable("ch-" + host)
+		if c.Clicked(gtx) {
+			g.dlg.field.set(host)
+			g.startConnect(host)
+			return total
+		}
+		func() {
+			st := op.Offset(r.Min).Push(gtx.Ops)
+			defer st.Pop()
+			cg := gtx
+			cg.Constraints = layout.Exact(r.Size())
+			c.Layout(cg, func(gtx layout.Context) layout.Dimensions {
+				if c.Hovered() {
+					paint.FillShape(gtx.Ops, g.th.Hover, clip.UniformRRect(image.Rectangle{Max: r.Size()}, gtx.Dp(8)).Op(gtx.Ops))
+				}
+				pointer.CursorPointer.Add(gtx.Ops)
+				return layout.Dimensions{Size: r.Size()}
+			})
+		}()
+		iconServer(gtx, image.Pt(r.Min.X+gtx.Dp(16), r.Min.Y+r.Dy()/2), float32(gtx.Dp(6)), g.th.TextFaint)
+		g.drawTextMid(gtx, image.Pt(r.Min.X+gtx.Dp(32), r.Min.Y+r.Dy()/2), g.th.UISize, font.Normal, g.th.Text, host, r.Dx()-gtx.Dp(70))
+		xr := image.Rect(r.Max.X-gtx.Dp(30), r.Min.Y+gtx.Dp(3), r.Max.X-gtx.Dp(4), r.Max.Y-gtx.Dp(3))
+		if g.ghostButton(gtx, "chx-"+host, xr, "Forget "+host, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+			iconCross(gtx, c, float32(gtx.Dp(3.5)), float32(max(1, gtx.Dp(1.2))), col)
+		}) {
+			g.forgetHost(host)
+			return total
+		}
+	}
+	return total
 }

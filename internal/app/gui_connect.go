@@ -295,6 +295,7 @@ func (g *guiApp) pollConnect() {
 	}
 	saveSettings(g.settings)
 	g.switchBackend(res.b)
+	g.sideHost = res.host
 }
 
 // switchBackend connects the window to b as its remote host (nil leaves the
@@ -305,6 +306,7 @@ func (g *guiApp) switchBackend(b SessionBackend) {
 		return
 	}
 	_, oldHost := g.mb.Remote()
+	g.sideHost = "" // a host connected next sets it again
 	if oldHost != "" {
 		if g.main != nil && strings.HasPrefix(g.main.name, hostPrefix(oldHost)) {
 			g.closeMain()
