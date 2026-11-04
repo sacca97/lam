@@ -171,8 +171,12 @@ func (h *hostSession) setReason(reason string) {
 // hostEnv is the environment for the session command. TMUX is dropped because
 // it would point at a server that is not the session's.
 func hostEnv() []string {
-	env := envWithout("TMUX", "TMUX_PANE", "TERM", "COLORTERM")
-	return append(env, "TERM=xterm-256color", "COLORTERM=truecolor")
+	env := envWithout("TMUX", "TMUX_PANE", "TERM", "COLORTERM", "PI_CLIPBOARD_OSC52")
+	// Pi sends a copy to the terminal (OSC 52) only when it sees an SSH
+	// session or this variable, which it documents for multiplexers. The
+	// window or terminal that shows the session may be on another machine, and
+	// writes the clipboard from that sequence.
+	return append(env, "TERM=xterm-256color", "COLORTERM=truecolor", "PI_CLIPBOARD_OSC52=1")
 }
 
 // Default colors reported to programs that ask what the terminal looks like

@@ -40,6 +40,7 @@ type docPickRow struct {
 }
 
 type docPicker struct {
+	visible    int    // how many rows the list shows; set when drawn
 	host, base string // the machine, and the folder relative input is taken from
 	dir        string // the folder (as typed, ending in /) that all lists
 	all        []docEntry
@@ -277,9 +278,9 @@ func (g *guiApp) pickKey(ev key.Event) bool {
 			show(pk.sel - 1)
 		}
 	case key.NamePageDown:
-		show(pk.sel + docPickVisible - 1)
+		show(pk.sel + pk.rowsShown() - 1)
 	case key.NamePageUp:
-		show(max(pk.sel-docPickVisible+1, 0))
+		show(max(pk.sel-pk.rowsShown()+1, 0))
 	case key.NameHome:
 		if pk.sel < 0 {
 			return false
@@ -325,8 +326,13 @@ func (g *guiApp) pickKey(ev key.Event) bool {
 	return true
 }
 
-// docPickVisible is how many rows the list shows; set when drawn.
-var docPickVisible = 8
+// rowsShown is how many rows the list shows.
+func (pk *docPicker) rowsShown() int {
+	if pk.visible <= 0 {
+		return 8
+	}
+	return pk.visible
+}
 
 // layoutDocPick draws the whole browser at y: the back, forward and up buttons
 // with the path field, the clickable path, and the list. It returns its height.
@@ -428,7 +434,7 @@ func (g *guiApp) layoutDocPick(gtx layout.Context, pad, y, inner int) int {
 	// The list.
 	rowH := gtx.Dp(docPickRowDp)
 	rows := g.pickRows()
-	visible := docPickVisible
+	visible := pk.rowsShown()
 	area := image.Rect(pad, y, pad+inner, y+visible*rowH)
 	pk.rowH, pk.view = rowH, area.Dy()
 	rr := clip.UniformRRect(area, gtx.Dp(8))

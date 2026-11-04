@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -169,7 +170,10 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 			}
 			return g.layoutRow(gtx, rows[i], pad, now)
 		})
-		if animate {
+		g.mu.Lock()
+		looked := g.windowFocused
+		g.mu.Unlock()
+		if animate && looked { // an unfocused window does not redraw for the halo
 			gtx.Execute(op.InvalidateCmd{At: now.Add(60 * time.Millisecond)})
 		} else if !g.nextAge.IsZero() {
 			gtx.Execute(op.InvalidateCmd{At: g.nextAge})
@@ -200,19 +204,41 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 			g.openUpdate()
 		}
 	}
+	// Connecting to a host: the icon with its words, and the host's name once
+	// connected, so it is clear what this button is and where the sessions run.
 	cr := hr.Add(image.Pt(b+gtx.Dp(2), 0))
-	if g.ghostButton(gtx, "connect", cr, "Connect to a host  "+map[bool]string{true: "⌘O", false: "Ctrl+Shift+O"}[guiMac], g.remote, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+	label, tip := "Connect", "Connect to a host  "+map[bool]string{true: "⌘O", false: "Ctrl+Shift+O"}[guiMac]
+	if g.remote {
+		_, host := g.mb.Remote()
+		label, tip = "Disconnect", "Disconnect from "+host+" (its sessions keep running)"
+	}
+	reserve := gtx.Dp(8)
+	if _, ok := g.upd.available(); ok {
+		reserve += gtx.Dp(72)
+	}
+	gl, tw, _ := g.shape(gtx, g.th.TinySize, font.Medium, label, max(gtx.Dp(30), size.X-cr.Min.X-pad-b-reserve))
+	cr.Max.X = cr.Min.X + b + tw + gtx.Dp(6)
+	if g.ghostButton(gtx, "connect", cr, tip, g.remote, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		if g.remote {
 			col = g.th.Accent
 		}
-		iconServer(gtx, c, float32(gtx.Dp(7)), col)
+		iconServer(gtx, image.Pt(cr.Min.X+b/2, c.Y), float32(gtx.Dp(7)), col)
+		if len(gl) > 0 {
+			asc, desc := gl[0].Ascent.Ceil(), gl[0].Descent.Ceil()
+			g.paintGlyphs(gtx, gl, image.Pt(cr.Min.X+b-gtx.Dp(2), c.Y+(asc-desc)/2), col)
+		}
 	}) {
-		g.openConnect()
+		if g.remote {
+			g.connID++
+			g.switchBackend(nil)
+		} else {
+			g.openConnect()
+		}
 	}
 }
 
 func (g *guiApp) layoutEmptyList(gtx layout.Context, listErr string, pad int) {
-	title, body := "No sessions yet", "Press + to start one."
+	title, body := "No sessions yet", "Start one, or connect to a host."
 	switch {
 	case listErr != "":
 		title, body = "Sessions unavailable", listErr
@@ -222,6 +248,26 @@ func (g *guiApp) layoutEmptyList(gtx layout.Context, listErr string, pad int) {
 	w := gtx.Constraints.Max.X - 2*pad
 	g.drawText(gtx, image.Pt(pad+gtx.Dp(6), gtx.Dp(14)), g.th.SmallSize, font.Medium, g.th.TextDim, title, w)
 	g.drawText(gtx, image.Pt(pad+gtx.Dp(6), gtx.Dp(36)), g.th.TinySize, font.Normal, g.th.TextFaint, body, w)
+	if g.filter != "" {
+		return
+	}
+	// With nothing to show, the two things to do are buttons, not a hint.
+	x, y := pad+gtx.Dp(6), gtx.Dp(92)
+	if listErr == "" {
+		g.buttonStyled(gtx, "empty-new", "New session", image.Pt(x, y), false, false, true)
+		if g.clicked(gtx, "empty-new") {
+			g.openNewSession()
+		}
+		y += gtx.Dp(40)
+	}
+	label := "Connect to a host"
+	if g.remote {
+		label = "Change host"
+	}
+	g.buttonStyled(gtx, "empty-connect", label, image.Pt(x, y), false, false, false)
+	if g.clicked(gtx, "empty-connect") {
+		g.openConnect()
+	}
 }
 
 // layoutSearch draws the filter field; clicking it gives it the keyboard.
@@ -316,16 +362,26 @@ func (g *guiApp) ghostButtonTinted(gtx layout.Context, id string, r image.Rectan
 	return clicked
 }
 
-// tooltip shows a label under r, drawn over everything else.
+// tooltip shows a label under r (above it at the bottom edge), drawn over
+// everything else.
 func (g *guiApp) tooltip(gtx layout.Context, r image.Rectangle, text string) {
 	m := op.Record(gtx.Ops)
 	gl, w, _ := g.shape(gtx, g.th.TinySize, font.Medium, text, 1<<20)
 	ph, pw := gtx.Dp(26), w+gtx.Dp(18)
 	x := (r.Min.X+r.Max.X)/2 - pw/2
+	if edge := gtx.Constraints.Max.X - gtx.Dp(4); x+pw > edge {
+		x = edge - pw
+	}
 	if x < gtx.Dp(4) {
 		x = gtx.Dp(4)
 	}
-	tr := image.Rect(x, r.Max.Y+gtx.Dp(6), x+pw, r.Max.Y+gtx.Dp(6)+ph)
+	// Under the control, or above it when there is no room below: the footer
+	// buttons sit at the bottom edge of the window.
+	y := r.Max.Y + gtx.Dp(6)
+	if y+ph > gtx.Constraints.Max.Y-gtx.Dp(4) {
+		y = r.Min.Y - gtx.Dp(6) - ph
+	}
+	tr := image.Rect(x, y, x+pw, y+ph)
 	rr := clip.UniformRRect(tr, gtx.Dp(6))
 	paint.FillShape(gtx.Ops, g.th.Selected, rr.Op(gtx.Ops))
 	paint.FillShape(gtx.Ops, g.th.Border, clip.Stroke{Path: rr.Path(gtx.Ops), Width: float32(max(1, gtx.Dp(1)))}.Op())
@@ -500,7 +556,9 @@ func (g *guiApp) layoutSection(gtx layout.Context, r guiRow, pad int) layout.Dim
 
 	kind, detail, detailCol := "LOCAL", r.label, g.th.TextFaint
 	iconCol := g.th.TextDim
-	if r.host != "" {
+	if r.saved {
+		kind, detailCol, iconCol = "REMOTE", g.th.TextDim, g.th.TextFaint
+	} else if r.host != "" {
 		kind = "REMOTE"
 		if st := currentLinkStatus(); !st.Up {
 			detail, detailCol, iconCol = linkStatusText(st, time.Now()), g.th.Unread, g.th.Unread
@@ -520,7 +578,28 @@ func (g *guiApp) layoutSection(gtx layout.Context, r guiRow, pad int) layout.Dim
 	}
 	x += gtx.Dp(14)
 	br := image.Rect(band.Max.X-gtx.Dp(28), cy-gtx.Dp(12), band.Max.X-gtx.Dp(4), cy+gtx.Dp(12))
-	if g.ghostButton(gtx, "new-on-"+r.host, br, "New session on "+r.label, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+	if r.saved {
+		// A host connected to before: kept here, not connected, with a way back.
+		forget := br
+		if g.ghostButton(gtx, "forget-"+r.host, forget, "Forget "+r.label, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+			iconCross(gtx, c, float32(gtx.Dp(3.5)), float32(max(1, gtx.Dp(1.2))), col)
+		}) {
+			g.forgetHost(r.host)
+		}
+		gl, tw, _ := g.shape(gtx, g.th.TinySize, font.Medium, "Connect", w)
+		cr := image.Rect(forget.Min.X-gtx.Dp(6)-tw-gtx.Dp(16), cy-gtx.Dp(12), forget.Min.X-gtx.Dp(2), cy+gtx.Dp(12))
+		if g.ghostButtonTinted(gtx, "connect-"+r.host, cr, "Connect to "+r.label, true, color.NRGBA{}, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+			if len(gl) > 0 {
+				asc, desc := gl[0].Ascent.Ceil(), gl[0].Descent.Ceil()
+				g.paintGlyphs(gtx, gl, image.Pt(c.X-tw/2, c.Y+(asc-desc)/2), g.th.Accent)
+			}
+		}) {
+			g.openConnect()
+			g.dlg.field.set(r.host)
+			g.startConnect(r.host)
+		}
+		br = cr
+	} else if g.ghostButton(gtx, "new-on-"+r.host, br, "New session on "+r.label, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		iconPlus(gtx, c, float32(gtx.Dp(4.5)), float32(max(1, gtx.Dp(1.4))), col)
 	}) {
 		g.openNewSessionOn(r.host)
@@ -528,6 +607,12 @@ func (g *guiApp) layoutSection(gtx layout.Context, r guiRow, pad int) layout.Dim
 	x += g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.Bold, g.th.Text, kind, w) + gtx.Dp(8)
 	g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.Normal, detailCol, detail, br.Min.X-x-gtx.Dp(4))
 	return layout.Dimensions{Size: image.Pt(w, gap+h+gtx.Dp(2))}
+}
+
+// forgetHost drops a saved host from the sidebar.
+func (g *guiApp) forgetHost(host string) {
+	g.settings.GUIHosts = slices.DeleteFunc(slices.Clone(g.settings.GUIHosts), func(h string) bool { return h == host })
+	saveSettings(g.settings)
 }
 
 func (g *guiApp) layoutGroupHeader(gtx layout.Context, r guiRow, pad int) layout.Dimensions {

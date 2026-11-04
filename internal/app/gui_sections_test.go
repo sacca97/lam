@@ -141,3 +141,29 @@ func TestGUIProjectPlusStaysUnderThePointer(t *testing.T) {
 		t.Fatalf("clicking the + opened dialog %v, not a new session", g.dlg.kind)
 	}
 }
+
+// Hosts connected to before stay in the sidebar, not connected, with a way
+// back, until they are forgotten.
+func TestSidebarKeepsSavedHosts(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.settings.GUIHosts = []string{"fedora", "lab-box"}
+	saved := func() (names []string) {
+		for _, r := range g.sidebarRows(filteredSessions(g.allSessions(), "")) {
+			if r.section && r.saved {
+				names = append(names, r.label)
+			}
+		}
+		return
+	}
+	if got := saved(); len(got) != 2 || got[0] != "fedora" || got[1] != "lab-box" {
+		t.Fatalf("saved hosts shown: %v", got)
+	}
+	g.forgetHost("fedora")
+	if got := saved(); len(got) != 1 || got[0] != "lab-box" {
+		t.Fatalf("after forgetting: %v", got)
+	}
+	if _, err := g.launchersOn("lab-box"); err == nil {
+		t.Fatal("agents of a host that is not connected were listed")
+	}
+}

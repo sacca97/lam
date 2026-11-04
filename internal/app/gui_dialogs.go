@@ -583,7 +583,7 @@ func (g *guiApp) advanceNewSession() {
 			w.error = err.Error()
 			return
 		}
-		available, err := availableSessionLaunchers()
+		available, err := g.launchersOn(w.host)
 		if err != nil {
 			w.error = err.Error()
 			return
@@ -619,39 +619,81 @@ func (g *guiApp) advanceNewSession() {
 	}
 }
 
+// The settings rows, in the order they are shown, under these headings.
 const (
-	guiSettingsRows  = 9
-	settingUpdates   = 6 // look for a newer release
-	settingVersion   = 7 // the version, and the update when there is one
-	settingPasswords = 8 // the SSH passwords kept in the keychain
+	settingTheme = iota
+	settingTextSize
+	settingPlacement
+	settingTermSize
+	settingNotify
+	settingTailscale
+	settingPasswords // the SSH passwords kept in the keychain
+	settingUpdates   // look for a newer release
+	settingVersion   // the version, and the update when there is one
+	guiSettingsRows
 )
+
+// settingSection is the heading shown above a row, "" when it continues the
+// group above.
+func settingSection(row int) string {
+	switch row {
+	case settingTheme:
+		return "Appearance"
+	case settingPlacement:
+		return "Terminal"
+	case settingNotify:
+		return "Notifications"
+	case settingTailscale:
+		return "Connections"
+	case settingUpdates:
+		return "Updates"
+	}
+	return ""
+}
+
+const (
+	settingRowH     = 34 // dp
+	settingRowPitch = 36
+	settingHeadH    = 26
+)
+
+// settingsHeight is the height of the rows with their headings.
+func settingsHeight(gtx layout.Context) int {
+	h := guiSettingsRows * gtx.Dp(settingRowPitch)
+	for i := range guiSettingsRows {
+		if settingSection(i) != "" {
+			h += gtx.Dp(settingHeadH)
+		}
+	}
+	return h
+}
 
 func (g *guiApp) changeSetting(row, step int) {
 	s := &g.settings
 	switch row {
-	case 0:
+	case settingPlacement:
 		if s.TerminalPlacement == terminalRight {
 			s.TerminalPlacement = terminalBelow
 		} else {
 			s.TerminalPlacement = terminalRight
 		}
-	case 1:
+	case settingTermSize:
 		s.TerminalPercent = cyclePercent(s.TerminalPercent, step)
-	case 2:
+	case settingNotify:
 		s.MuteNotifications = !s.MuteNotifications
 		g.mu.Lock()
 		g.mute = s.MuteNotifications
 		g.mu.Unlock()
-	case 3:
+	case settingTextSize:
 		s.GUIFontSize = min(max(g.fontSize()+float32(step)*0.5, minGUIFontSize), maxGUIFontSize)
-	case 4:
+	case settingTheme:
 		if g.th.Name == "light" {
 			s.GUITheme = "dark"
 		} else {
 			s.GUITheme = "light"
 		}
 		g.setTheme(s.GUITheme)
-	case 5:
+	case settingTailscale:
 		s.TailscaleAutoUp = !s.TailscaleAutoUp
 	case settingUpdates:
 		s.NoUpdateCheck = !s.NoUpdateCheck
@@ -700,15 +742,15 @@ func (g *guiApp) settingValues() [guiSettingsRows][2]string {
 		tailscale = "Turn on"
 	}
 	return [guiSettingsRows][2]string{
-		{"Terminal position", placement},
-		{"Terminal size", fmt.Sprintf("%d%%", s.TerminalPercent)},
-		{"Notify when done", notify},
-		{"Text size", textSizeLabel(g.fontSize(), s.GUIFontSize == 0)},
-		{"Theme", theme},
-		{"Tailscale if off", tailscale},
-		{"Look for updates", map[bool]string{true: "On", false: "Off"}[updateChecksOn(s)]},
-		{"lam " + shownVersion(), g.upd.versionStatus()},
-		{"Saved SSH passwords", savedPasswordsLabel()},
+		settingTheme:     {"Theme", theme},
+		settingTextSize:  {"Text size", textSizeLabel(g.fontSize(), s.GUIFontSize == 0)},
+		settingPlacement: {"Position", placement},
+		settingTermSize:  {"Size", fmt.Sprintf("%d%%", s.TerminalPercent)},
+		settingNotify:    {"Notify when an agent finishes", notify},
+		settingTailscale: {"Start Tailscale if it is off", tailscale},
+		settingPasswords: {"Saved SSH passwords", savedPasswordsLabel()},
+		settingUpdates:   {"Look for updates", map[bool]string{true: "On", false: "Off"}[updateChecksOn(s)]},
+		settingVersion:   {"lam " + shownVersion(), g.upd.versionStatus()},
 	}
 }
 
@@ -850,8 +892,8 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	case dlgRename, dlgConnect:
 		contentH += gtx.Dp(44)
 	case dlgOpenDoc:
-		docPickVisible = min(9, max(3, (size.Y-gtx.Dp(370))/gtx.Dp(docPickRowDp)))
-		contentH += gtx.Dp(48) + gtx.Dp(30) + docPickVisible*gtx.Dp(docPickRowDp) + gtx.Dp(8)
+		d.pick.visible = min(9, max(3, (size.Y-gtx.Dp(370))/gtx.Dp(docPickRowDp)))
+		contentH += gtx.Dp(48) + gtx.Dp(30) + d.pick.visible*gtx.Dp(docPickRowDp) + gtx.Dp(8)
 	case dlgAsk:
 		if !d.ask.yesNo {
 			contentH += gtx.Dp(44)
@@ -869,7 +911,7 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 			contentH += gtx.Dp(30) + len(d.wizard.providers)*gtx.Dp(42)
 		}
 	case dlgSettings:
-		contentH += guiSettingsRows * gtx.Dp(44)
+		contentH += settingsHeight(gtx)
 	case dlgHelp:
 		contentH += len(guiShortcuts()) * lineH
 	}
@@ -1029,7 +1071,11 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	case dlgSettings:
 		values := g.settingValues()
 		for i, row := range values {
-			r := image.Rect(pad, y, pad+inner, y+gtx.Dp(40))
+			if head := settingSection(i); head != "" {
+				g.drawText(gtx, image.Pt(pad+gtx.Dp(12), y+gtx.Dp(8)), g.th.TinySize, font.Bold, g.th.TextFaint, strings.ToUpper(head), inner)
+				y += gtx.Dp(settingHeadH)
+			}
+			r := image.Rect(pad, y, pad+inner, y+gtx.Dp(settingRowH))
 			id := fmt.Sprintf("set-%d", i)
 			c := g.clickable(id)
 			if c.Clicked(gtx) {
@@ -1056,7 +1102,7 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 				}
 				g.drawTextRightMid(gtx, image.Pt(r.Dx()-gtx.Dp(12), r.Dy()/2), g.th.UISize, g.th.Accent, value)
 			}()
-			y += gtx.Dp(44)
+			y += gtx.Dp(settingRowPitch)
 		}
 	case dlgHelp:
 		for _, b := range guiShortcuts() {
@@ -1132,7 +1178,7 @@ func (g *guiApp) layoutMenu(gtx layout.Context) {
 	}{
 		{termLabel, false, g.toggleTerminal},
 		{"Rename…", false, func() { g.openRename(m.s) }},
-		{"New session here…", false, g.openNewSession},
+		{"New session here…", false, func() { g.openNewSessionIn(m.s.CWD, m.s.Host) }},
 		{"Stop…", true, func() { g.openStop(m.s) }},
 	}
 	itemH, w, pad := gtx.Dp(36), gtx.Dp(230), gtx.Dp(5)

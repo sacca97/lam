@@ -283,6 +283,10 @@ func (g *guiApp) pollConnect() {
 	}
 	g.closeDialog()
 	g.settings.GUILastHost = res.host
+	g.settings.GUIHosts = append([]string{res.host}, slices.DeleteFunc(slices.Clone(g.settings.GUIHosts), func(h string) bool { return h == res.host })...)
+	if len(g.settings.GUIHosts) > 8 {
+		g.settings.GUIHosts = g.settings.GUIHosts[:8]
+	}
 	if res.tailnet != "" && !slices.Contains(g.settings.TailnetHosts, res.tailnet) {
 		g.settings.TailnetHosts = append(g.settings.TailnetHosts, res.tailnet)
 	}

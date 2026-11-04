@@ -801,6 +801,9 @@ func (g *guiApp) layout(gtx layout.Context) layout.Dimensions {
 		mg.Constraints = layout.Exact(image.Pt(size.X-x, size.Y))
 		g.layoutMain(mg)
 	}()
+	if g.dlg.kind != dlgNone {
+		g.menu = nil // a dialog opened over it: nothing is to be picked from the menu
+	}
 	if g.menu != nil {
 		g.layoutMenu(gtx)
 	}
@@ -1460,6 +1463,7 @@ func (g *guiApp) filterKey(ev key.Event) {
 // guiRow is one line of the session list: a project heading or a session.
 type guiRow struct {
 	section bool // the heading over one machine's sessions
+	saved   bool // a section for a host connected to before, and not connected now
 	header  bool
 	host    string // the machine, for a section or a project heading
 	first   bool   // a project heading right under its section heading
@@ -1494,7 +1498,7 @@ func (g *guiApp) cachedRows() []guiRow {
 		first = &all[0]
 	}
 	_, rhost := g.mb.Remote()
-	host, ver := g.hostLabel()+"|"+rhost, g.rowsVer.Load()
+	host, ver := g.hostLabel()+"|"+rhost+"|"+strings.Join(g.settings.GUIHosts, ","), g.rowsVer.Load()
 	if c.valid && c.first == first && c.n == len(all) && c.filter == g.filter && c.selected == g.selected &&
 		c.host == host && c.ver == ver && c.seenCollapse == c.collapsedVer {
 		return c.rows
@@ -1532,6 +1536,13 @@ func (g *guiApp) sidebarRows(list []sessionInfo) []guiRow {
 	}
 	if remote != "" && !remoteShown {
 		showRemote()
+	}
+	if g.filter == "" {
+		for _, h := range g.settings.GUIHosts {
+			if h != remote {
+				rows = append(rows, guiRow{section: true, saved: true, host: h, label: h})
+			}
+		}
 	}
 	return rows
 }
@@ -1714,6 +1725,24 @@ func (g *guiApp) sourceFor(host string) sessionDirectorySource {
 		}
 	}
 	return g.pathSource
+}
+
+// launchersOn are the agents installed on the machine a new session is for:
+// asking this machine about a session on the remote host showed the agents
+// installed here, and hid the ones installed there.
+func (g *guiApp) launchersOn(host string) ([]string, error) {
+	if host != "" {
+		r, h := g.mb.Remote()
+		if lister, ok := r.(sessionLauncherLister); ok && h == host {
+			got, err := lister.AvailableLaunchers()
+			if err != nil {
+				return nil, err
+			}
+			return orderedSupportedLaunchers(got), nil
+		}
+		return nil, fmt.Errorf("%s is not connected", host)
+	}
+	return installedLaunchers(), nil
 }
 
 func hostOrNative(host string) string {
