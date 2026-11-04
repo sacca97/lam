@@ -100,3 +100,22 @@ func terminalLabelAmbiguous(list []sessionInfo, owner string) bool {
 	}
 	return false
 }
+
+// stopOwnedTerminals ends the terminals of a session that has ended, so that
+// closing a session, or quitting its agent, leaves no shell behind. It runs in
+// the session's own host: every way a session ends (the window, the terminal
+// UI, the phone, `lam kill`, the agent exiting) passes through there, and on
+// the machine where the terminal lives.
+func stopOwnedTerminals(owner string) {
+	if _, isTerminal := terminalSessionLabel(owner); isTerminal {
+		return
+	}
+	b := nativeBackend{}
+	list, err := b.List()
+	if err != nil {
+		return
+	}
+	for _, t := range ownedTerminals(list, owner) {
+		_ = b.Kill(t.Name)
+	}
+}

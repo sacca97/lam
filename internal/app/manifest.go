@@ -187,7 +187,7 @@ func resumeCommand(command string) string {
 			return command
 		}
 		return base + " --continue"
-	case "pi", "opencode":
+	case "pi", "omp", "opencode":
 		if hasQuote {
 			return fields[0] + " --continue"
 		}

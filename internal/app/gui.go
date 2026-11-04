@@ -165,6 +165,9 @@ func (g *guiApp) fontSize() float32 {
 const guiBuilt = true
 
 func guiCmd(args []string) {
+	// Started from the Dock or Finder, the window has no shell's PATH, and the
+	// agents installed in ~/.local/bin or ~/.bun/bin would not be found.
+	go useLoginShellPATH()
 	g := newGUIApp(nil)
 	if len(args) >= 2 && args[0] == "ssh" {
 		// Connected from inside the window, so a host key, a password or a

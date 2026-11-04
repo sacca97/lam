@@ -48,6 +48,8 @@ func providerName(s sessionInfo) string {
 		return "Antigravity"
 	case kind == "pi":
 		return "pi"
+	case kind == "omp":
+		return "Oh My Pi"
 	case strings.HasPrefix(kind, "gemini"):
 		return "Gemini"
 	}

@@ -18,6 +18,8 @@ func TestResumeCommand(t *testing.T) {
 		"pi --continue":                        "pi --continue",
 		"pi -- 'start here'":                   "pi --continue",
 		"opencode":                             "opencode --continue",
+		"omp":                                  "omp --continue",
+		"omp 'start here'":                     "omp --continue",
 		"agy":                                  "agy --continue",
 		"agy --mode auto":                      "agy --mode auto --continue",
 		"agy --mode auto --prompt-interactive 'x'": "agy --mode auto --continue",

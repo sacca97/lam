@@ -324,6 +324,7 @@ func runHost(name, cwd, command string) error {
 	h.renameMu.Lock()
 	h.closing = true
 	_ = ln.Close()
+	endedName := h.name
 	removeSessionFiles(h.name)
 	reason, _ := h.reason.Load().(string)
 	logEvent("host %s ended: %s", h.name, reason)
@@ -337,6 +338,11 @@ func runHost(name, cwd, command string) error {
 	}
 	h.mu.Unlock()
 	ptmx.Close()
+	// A host stopped by a signal (logout, reboot) leaves the terminals to the
+	// same fate; the session was not closed on purpose.
+	if !h.signaled.Load() {
+		stopOwnedTerminals(endedName)
+	}
 	return nil
 }
 

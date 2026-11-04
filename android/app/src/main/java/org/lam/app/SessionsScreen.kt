@@ -65,6 +65,7 @@ internal fun provider(command: String): String {
         kind.startsWith("gemini") -> "Gemini"
         kind == "agy" -> "Antigravity"
         kind == "pi" -> "pi"
+        kind == "omp" -> "Oh My Pi"
         kind.isEmpty() || kind in setOf("sh", "bash", "zsh", "fish") -> "Shell"
         else -> kind
     }
@@ -195,6 +196,7 @@ internal fun launcherLabel(launcher: String) = when (launcher) {
     "codex" -> "Codex"
     "opencode" -> "opencode"
     "pi" -> "pi"
+    "omp" -> "Oh My Pi"
     "agy" -> "Antigravity"
     else -> launcher
 }
