@@ -34,7 +34,7 @@ func startDirectory() (string, error) {
 	}
 	return cwd, err
 }
-func (localDirectorySource) HomeDirectory() (string, error)    { return os.UserHomeDir() }
+func (localDirectorySource) HomeDirectory() (string, error) { return os.UserHomeDir() }
 func (localDirectorySource) ResolveSessionDir(input, base string) (string, error) {
 	return resolveSessionDir(input, base)
 }
