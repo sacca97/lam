@@ -165,15 +165,16 @@ func (g *guiApp) openNewSession() { g.openNewSessionOn(g.tabHost()) }
 // openNewSessionOn starts the dialog for a machine, in the folder of the
 // session being looked at when that is on the same machine.
 func (g *guiApp) openNewSessionOn(host string) {
-	if s, ok := g.selectedInfo(); ok && s.Host == host && s.CWD != "" {
-		g.openNewSessionIn(s.CWD, host)
-		return
+	g.openNewSessionIn(g.homeOf(host), host)
+}
+
+// homeOf is the home folder on a machine: every path a dialog asks for starts
+// there, and a relative one is read from there. Empty when it cannot be told.
+func (g *guiApp) homeOf(host string) string {
+	if home, err := g.sourceFor(host).HomeDirectory(); err == nil {
+		return home
 	}
-	start := ""
-	if host == "" {
-		start = g.launchDir
-	}
-	g.openNewSessionIn(start, host)
+	return ""
 }
 
 // openNewSessionIn starts the new session dialog with start as the directory,
@@ -208,18 +209,14 @@ func (g *guiApp) sessionsOn(host string) []sessionInfo {
 }
 
 // openDocumentDialog asks for a markdown or PDF file on the machine of the
-// session being looked at, starting in that session's folder.
+// session being looked at, starting in its home folder.
 func (g *guiApp) openDocumentDialog() {
-	host, start := "", g.launchDir
+	host := ""
 	if s, ok := g.selectedInfo(); ok {
 		host = s.Host
-		if s.CWD != "" {
-			start = s.CWD
-		} else if host != "" {
-			start = ""
-		}
 	}
 	src := g.sourceFor(host)
+	start := g.homeOf(host)
 	if start == "" {
 		if dir, err := src.WorkingDirectory(); err == nil {
 			start = dir

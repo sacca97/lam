@@ -142,13 +142,14 @@ func TestAbsoluteDocPath(t *testing.T) {
 // and clicking a file opens it.
 func TestGUIOpenDocumentDialogListsAndOpens(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir) // dialogs start in the home folder
 	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
 	os.WriteFile(filepath.Join(dir, "readme.md"), []byte("# Hi"), 0o644)
 	os.WriteFile(filepath.Join(dir, "paper.pdf"), []byte(tinyPDF), 0o644)
 	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644)
 	e := testPane(t, 100, 30)
 	g := newTestApp(t, e)
-	// The dialog starts in the folder of the session being looked at.
+	// The dialog starts in the home folder.
 	g.mu.Lock()
 	for i := range g.sessions {
 		if g.sessions[i].Name == g.selected {
@@ -192,6 +193,7 @@ func TestGUIOpenDocumentDialogListsAndOpens(t *testing.T) {
 // with up, back and forward, or by a step of the path.
 func TestGUIOpenDocumentDialogNavigation(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir) // dialogs start in the home folder
 	os.MkdirAll(filepath.Join(dir, "sub", "deep"), 0o755)
 	os.WriteFile(filepath.Join(dir, "sub", "inner.md"), []byte("# in"), 0o644)
 	e := testPane(t, 100, 30)
@@ -341,6 +343,7 @@ func TestGUIOpenDocumentDialogWheelScrolls(t *testing.T) {
 // wheel area above the rows.
 func TestGUIOpenDocumentDialogClicksRows(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir) // dialogs start in the home folder
 	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
 	os.WriteFile(filepath.Join(dir, "a.md"), []byte("# a"), 0o644)
 	e := testPane(t, 100, 30)

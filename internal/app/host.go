@@ -272,7 +272,7 @@ func runHost(name, cwd, command string) error {
 
 	// Metadata goes last: List only trusts a session once it is listening.
 	if cwd == "" {
-		cwd, _ = os.Getwd()
+		cwd, _ = startDirectory()
 	}
 	meta := sessionMeta{
 		Name:    name,

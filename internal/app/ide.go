@@ -564,7 +564,7 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 	}()
 
 	if launchDir == "" {
-		launchDir, _ = os.Getwd()
+		launchDir, _ = startDirectory()
 	}
 	pathSource, ok := backend().(sessionDirectorySource)
 	if !ok {

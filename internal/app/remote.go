@@ -909,7 +909,7 @@ func dispatchRemoteRequest(request remoteRequest) remoteResponse {
 	case "discard-restorable":
 		manifestForget(request.Names...)
 	case "cwd":
-		cwd, err := os.Getwd()
+		cwd, err := startDirectory()
 		if err != nil {
 			return fail(err)
 		}

@@ -19,7 +19,21 @@ type sessionDirectoryCompleter interface {
 
 type localDirectorySource struct{}
 
-func (localDirectorySource) WorkingDirectory() (string, error) { return os.Getwd() }
+func (localDirectorySource) WorkingDirectory() (string, error) { return startDirectory() }
+
+// startDirectory is where new shells and sessions start by default: the
+// current directory, but the home folder when that is the root (a window
+// opened from the desktop starts there) or cannot be read.
+func startDirectory() (string, error) {
+	cwd, err := os.Getwd()
+	if err == nil && cwd != "/" {
+		return cwd, nil
+	}
+	if home, herr := os.UserHomeDir(); herr == nil && home != "" {
+		return home, nil
+	}
+	return cwd, err
+}
 func (localDirectorySource) HomeDirectory() (string, error)    { return os.UserHomeDir() }
 func (localDirectorySource) ResolveSessionDir(input, base string) (string, error) {
 	return resolveSessionDir(input, base)
