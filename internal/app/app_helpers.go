@@ -142,6 +142,10 @@ func launcherCmd(launcher, prompt string) string {
 			cmd += " " + shellQuote(prompt)
 		case "agy":
 			cmd += " --prompt-interactive " + shellQuote(prompt)
+		case "codex":
+			cmd += " " + shellQuote(prompt)
+		case "opencode":
+			cmd += " --prompt " + shellQuote(prompt)
 		}
 	}
 	return cmd

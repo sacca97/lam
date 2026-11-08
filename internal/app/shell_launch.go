@@ -104,7 +104,7 @@ func parseShellAgentLaunch(line []byte) (shellAgentLaunch, bool) {
 	}
 	provider := fields[0]
 	switch provider {
-	case "pi", "omp", "codex", "claude", "agy":
+	case "pi", "omp", "codex", "claude", "agy", "opencode":
 		return shellAgentLaunch{provider: provider, command: command}, true
 	default:
 		return shellAgentLaunch{}, false

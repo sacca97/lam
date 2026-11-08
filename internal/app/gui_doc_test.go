@@ -7,6 +7,8 @@ import (
 	"gioui.org/f32"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
+	"gioui.org/layout"
+	"gioui.org/unit"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -586,5 +588,155 @@ func TestFollowLinkRefusesOddSchemes(t *testing.T) {
 func TestDirFieldRoot(t *testing.T) {
 	if got := dirField("/", localDirectorySource{}); got != "/" {
 		t.Fatalf("root = %q", got)
+	}
+}
+
+// A heading named in a #link is where the page scrolls to.
+func TestGUIDocumentAnchorLinksScroll(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("# Top\n\n[jump](#the-end) and [again](#top-1)\n\n")
+	for i := 0; i < 60; i++ {
+		src.WriteString("A paragraph of filler text that takes up room on the page.\n\n")
+	}
+	src.WriteString("## The end!\n\nLast words.\n\n# Top\n")
+	file := filepath.Join(t.TempDir(), "long.md")
+	os.WriteFile(file, []byte(src.String()), 0o644)
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.openDocument("", file)
+	waitDoc(t, g)
+	renderGUI(t, g, 1240, 720, 1)
+	if _, ok := g.doc.md.Anchors["the-end"]; !ok {
+		t.Fatalf("anchors = %v", g.doc.md.Anchors)
+	}
+	if _, ok := g.doc.md.Anchors["top-1"]; !ok {
+		t.Fatalf("a repeated heading has no -1 anchor: %v", g.doc.md.Anchors)
+	}
+	g.followLink("#the-end")
+	if g.doc.scrollY < 500 {
+		t.Fatalf("scrollY = %v after the link", g.doc.scrollY)
+	}
+}
+
+// Dragging across text selects it and Ctrl+C copies it; the scroll bar can be
+// dragged.
+func TestGUIDocumentSelectionAndScrollBar(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("# Heading\n\nfirst paragraph here\n\n")
+	for i := 0; i < 80; i++ {
+		src.WriteString("filler filler filler filler\n\n")
+	}
+	file := filepath.Join(t.TempDir(), "sel.md")
+	os.WriteFile(file, []byte(src.String()), 0o644)
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.openDocument("", file)
+	waitDoc(t, g)
+	d := &guiDriver{t: t, g: g}
+	d.frame()
+	d.frame()
+	d.frame()
+	dv := g.doc
+	var first, last docPos
+	for i, it := range dv.md.Items {
+		if it.Kind == mdText_ && it.Text == "first paragraph here" {
+			first = docPos{i, 0}
+			last = docPos{i, len(it.Text)}
+		}
+	}
+	if last.off == 0 {
+		t.Fatal("paragraph not found")
+	}
+	dv.selA, dv.selB, dv.hasSel = first, last, true
+	if got := dv.selectionText(func(it mdItem) float32 { return float32(len(it.Text)) * it.Size * 0.5 }); got != "first paragraph here" {
+		t.Fatalf("selected %q", got)
+	}
+	dv.selB.off = 5
+	if got := dv.selectionText(func(it mdItem) float32 { return float32(len(it.Text)) * it.Size * 0.5 }); got != "first" {
+		t.Fatalf("selected %q", got)
+	}
+
+	// Drag the thumb to the bottom.
+	_, _, ok := dv.thumb(layoutCtxFor(d))
+	if !ok {
+		t.Fatal("no scroll bar on a long page")
+	}
+	at := time.Duration(0)
+	send := func(kind pointer.Kind, x, y float32) {
+		at += time.Millisecond
+		// A drag is a move with the button down; Gio makes the Drag event.
+		var buttons pointer.Buttons
+		if kind == pointer.Press || kind == pointer.Drag {
+			buttons = pointer.ButtonPrimary
+		}
+		if kind == pointer.Drag {
+			kind = pointer.Move
+		}
+		d.router.Queue(pointer.Event{Kind: kind, Source: pointer.Mouse, Buttons: buttons, Position: f32.Pt(x, y), Time: at})
+		d.frame()
+	}
+	// The pane starts right of the sidebar and below the header; the bar is at
+	// the right edge. Find the pane from the thumb's position by probing.
+	g.doc.scrollY = 0
+	d.frame()
+	hit := false
+	for x := float32(1095); x > 1000 && !hit; x -= 4 {
+		for y := float32(60); y < 400 && !hit; y += 8 {
+			send(pointer.Move, x, y)
+			send(pointer.Press, x, y)
+			hit = dv.dragBar
+			if hit {
+				send(pointer.Drag, x, 690)
+				send(pointer.Release, x, 690)
+			} else {
+				send(pointer.Release, x, y)
+			}
+		}
+	}
+	if !hit || dv.scrollY <= 0 {
+		t.Fatalf("the scroll bar did not drag (hit %v, scrollY %v)", hit, dv.scrollY)
+	}
+}
+
+func layoutCtxFor(*guiDriver) layout.Context {
+	return layout.Context{Metric: unit.Metric{PxPerDp: 1, PxPerSp: 1}}
+}
+
+// A press of the wheel on a document's tab closes it; on the session's tab it
+// does nothing.
+func TestGUIDocumentTabClosesOnMiddleClick(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "alpha.md"), filepath.Join(dir, "beta.md")
+	os.WriteFile(a, []byte("# A"), 0o644)
+	os.WriteFile(b, []byte("# B"), 0o644)
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	d := &guiDriver{t: t, g: g}
+	g.openDocument("", a)
+	waitDoc(t, g)
+	g.openDocument("", b)
+	waitDoc(t, g)
+	d.frame()
+	d.frame()
+	at := time.Duration(0)
+	middle := func(x, y float32) {
+		p := f32.Pt(x, y)
+		for i := 0; i < 2; i++ {
+			at += time.Millisecond
+			d.router.Queue(pointer.Event{Kind: pointer.Move, Source: pointer.Mouse, Position: p, Time: at})
+			d.frame()
+		}
+		d.router.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonTertiary, Position: p, Time: at + time.Millisecond},
+			pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: at + 2*time.Millisecond})
+		d.frame()
+		d.frame()
+	}
+	middle(330, 23) // the session's tab
+	if len(g.docs) != 2 {
+		t.Fatalf("the wheel closed something on the session's tab: %d documents", len(g.docs))
+	}
+	middle(430, 23) // alpha's tab
+	if len(g.docs) != 1 || filepath.Base(g.docs[0].path) != "beta.md" {
+		t.Fatalf("the wheel left %d tabs", len(g.docs))
 	}
 }

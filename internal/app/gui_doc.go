@@ -7,20 +7,25 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/font/gofont"
 	giofont "gioui.org/font/opentype"
+	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -35,7 +40,7 @@ import (
 // The document viewer shows a markdown or PDF file in the main pane, in place
 // of a session, until it is closed or another session is picked. The file is
 // read here or on the connected host, then drawn by the window itself: the
-// markdown on a white page, the PDF as rendered pages.
+// markdown on a page that follows the theme, the PDF as rendered pages.
 
 const (
 	docBodyDp   = 16  // markdown text size, as on GitHub
@@ -70,10 +75,26 @@ type docView struct {
 	scrollY, scrollX float32
 	zoom             float32
 	tag              bool
+	tabTag           bool // the header tab takes the middle button
 	viewH, contentH  float32
 	links            []docLink // where the links are, in window coordinates, this frame
 	hover            image.Point
+
+	// What the pointer is doing: dragging the scroll bar, or selecting text.
+	dragBar    bool
+	barGrab    float32 // where on the thumb it was taken
+	selecting  bool
+	selA, selB docPos
+	hasSel     bool
+	stale      atomic.Bool // the load goroutine replaced the data: the UI drops md at the next frame
+	barH       float32     // the scroll thumb's height, from the last frame
+	x0, margin float32     // where the page starts, set each frame, for hit tests
 }
+
+// docPos is a place in the text: an item of the layout and a byte in it.
+type docPos struct{ item, off int }
+
+func (a docPos) less(b docPos) bool { return a.item < b.item || a.item == b.item && a.off < b.off }
 
 type pdfPage struct {
 	asked   int // the width wanted; the render may be smaller (see pdfDoc.render)
@@ -123,7 +144,10 @@ func (g *guiApp) openDocument(host, p string) {
 	for _, dv := range g.docs {
 		if dv.host == host && dv.path == p {
 			g.doc = dv // already open: its tab comes to the front
-			if dv.err != "" {
+			g.mu.Lock()
+			failed := dv.err != ""
+			g.mu.Unlock()
+			if failed {
 				g.loadDocument(dv)
 			}
 			return
@@ -167,7 +191,8 @@ func (g *guiApp) loadDocument(dv *docView) {
 			dv.mu.Lock()
 			old := dv.pdf
 			dv.data, dv.modified, dv.pdf = d.Data, d.Modified, pdf
-			dv.pages, dv.md = map[int]*pdfPage{}, nil
+			dv.pages = map[int]*pdfPage{}
+			dv.stale.Store(true)
 			dv.mu.Unlock()
 			if old != nil {
 				old.Close()
@@ -290,7 +315,7 @@ func (dv *docView) zoomBy(f float32) {
 	dv.invalidateLayout()
 }
 
-func (dv *docView) invalidateLayout() { dv.md = nil }
+func (dv *docView) invalidateLayout() { dv.md, dv.hasSel = nil, false }
 
 // docShaper draws the document's text in Go's fonts, which come with the
 // program, so a document looks the same wherever it is opened.
@@ -308,6 +333,13 @@ type docShaped struct {
 func (g *guiApp) docShape(s string, px float32, bold, italic, mono bool) docShaped {
 	key := docShapeKey{s, px, bold, italic, mono}
 	if v, ok := g.docShapes[key]; ok {
+		return v
+	}
+	if v, ok := g.docShapesOld[key]; ok {
+		if g.docShapes == nil {
+			g.docShapes = map[docShapeKey]docShaped{}
+		}
+		g.docShapes[key] = v
 		return v
 	}
 	if g.docText == nil {
@@ -332,6 +364,7 @@ func (g *guiApp) docShape(s string, px float32, bold, italic, mono bool) docShap
 		v.w = max(v.w, float32((gg.X + gg.Advance).Ceil()))
 	}
 	if g.docShapes == nil || len(g.docShapes) > 8192 {
+		g.docShapesOld = g.docShapes
 		g.docShapes = map[docShapeKey]docShaped{}
 	}
 	g.docShapes[key] = v
@@ -483,6 +516,23 @@ func (g *guiApp) layoutTabs(gtx layout.Context, left, right, cy int) {
 				return layout.Dimensions{Size: r.Size()}
 			})
 		}()
+		if t.dv != nil {
+			// A press of the wheel closes the tab, as in a browser.
+			pass := pointer.PassOp{}.Push(gtx.Ops) // the tab's own click is still the button's
+			st := clip.Rect(r).Push(gtx.Ops)
+			event.Op(gtx.Ops, &t.dv.tabTag)
+			st.Pop()
+			pass.Pop()
+			for {
+				ev, ok := gtx.Event(pointer.Filter{Target: &t.dv.tabTag, Kinds: pointer.Press})
+				if !ok {
+					break
+				}
+				if pe, ok := ev.(pointer.Event); ok && pe.Buttons.Contain(pointer.ButtonTertiary) {
+					closing = t.dv
+				}
+			}
+		}
 		if active {
 			paint.FillShape(gtx.Ops, g.th.Accent, clip.UniformRRect(image.Rect(r.Min.X+gtx.Dp(10), r.Max.Y-gtx.Dp(2), r.Max.X-gtx.Dp(10), r.Max.Y), gtx.Dp(1)).Op(gtx.Ops))
 		}
@@ -528,7 +578,9 @@ func (g *guiApp) layoutTabs(gtx layout.Context, left, right, cy int) {
 func (g *guiApp) layoutDoc(gtx layout.Context, r image.Rectangle) {
 	dv := g.doc
 	dv.viewH = float32(r.Dy())
-	dv.links = dv.links[:0]
+	if dv.stale.Swap(false) {
+		dv.md, dv.hasSel, dv.selecting = nil, false, false
+	}
 	g.mu.Lock()
 	loading, errText := dv.loading, dv.err
 	g.mu.Unlock()
@@ -555,14 +607,31 @@ func (g *guiApp) layoutDoc(gtx layout.Context, r image.Rectangle) {
 	} else {
 		g.drawMarkdown(gtx, local, r.Min)
 	}
-	// A thin scroll position.
-	if dv.contentH > dv.viewH && dv.viewH > 0 {
-		h := max(float32(gtx.Dp(24)), dv.viewH*dv.viewH/dv.contentH)
-		y := (dv.viewH - h) * dv.scrollY / max(1, dv.contentH-dv.viewH)
-		bar := image.Rect(r.Dx()-gtx.Dp(8), int(y), r.Dx()-gtx.Dp(3), int(y+h))
-		paint.FillShape(gtx.Ops, color.NRGBA{A: 70}, clip.UniformRRect(bar, gtx.Dp(3)).Op(gtx.Ops))
-	}
 	dv.scrollY = min(max(dv.scrollY, 0), max(0, dv.contentH-dv.viewH))
+	// The scroll bar: it can be dragged, and a press on its track jumps.
+	if h, y, ok := dv.thumb(gtx); ok {
+		col := color.NRGBA{A: 70}
+		if g.th.Name == "dark" {
+			col = color.NRGBA{R: 255, G: 255, B: 255, A: 70}
+		}
+		if dv.dragBar {
+			col.A = 130
+		}
+		bar := image.Rect(r.Dx()-gtx.Dp(9), int(y), r.Dx()-gtx.Dp(3), int(y+h))
+		paint.FillShape(gtx.Ops, col, clip.UniformRRect(bar, gtx.Dp(3)).Op(gtx.Ops))
+	}
+}
+
+// thumb is the scroll bar's thumb: its height and top, and whether there is
+// anything to scroll.
+func (dv *docView) thumb(gtx layout.Context) (h, y float32, ok bool) {
+	if dv.contentH <= dv.viewH || dv.viewH <= 0 {
+		return 0, 0, false
+	}
+	h = max(float32(gtx.Dp(24)), dv.viewH*dv.viewH/dv.contentH)
+	y = (dv.viewH - h) * dv.scrollY / max(1, dv.contentH-dv.viewH)
+	dv.barH = h
+	return h, y, true
 }
 
 // docInput takes the wheel (Ctrl and the wheel zoom) and clicks on links.
@@ -575,7 +644,7 @@ func (g *guiApp) docInput(gtx layout.Context, local image.Rectangle, origin imag
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target:  &dv.tag,
-			Kinds:   pointer.Scroll | pointer.Press | pointer.Move,
+			Kinds:   pointer.Scroll | pointer.Press | pointer.Move | pointer.Drag | pointer.Release | pointer.Cancel,
 			ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20},
 			ScrollX: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20},
 		})
@@ -602,14 +671,48 @@ func (g *guiApp) docInput(gtx layout.Context, local image.Rectangle, origin imag
 			dv.scrollY += pe.Scroll.Y
 			dv.scrollX += pe.Scroll.X
 		case pointer.Press:
-			if pe.Buttons.Contain(pointer.ButtonPrimary) {
-				for _, l := range dv.links {
-					if at.In(l.r) {
-						g.followLink(l.dest)
-						break
-					}
+			if !pe.Buttons.Contain(pointer.ButtonPrimary) {
+				continue
+			}
+			if h, y, ok := dv.thumb(gtx); ok && int(pe.Position.X) >= local.Dx()-gtx.Dp(16) {
+				dv.dragBar = true
+				dv.barGrab = h / 2 // a press on the track centres the thumb there
+				if py := pe.Position.Y; py >= y && py <= y+h {
+					dv.barGrab = py - y
+				}
+				dv.dragTo(pe.Position.Y)
+				continue
+			}
+			followed := false
+			for _, l := range dv.links {
+				if at.In(l.r) {
+					g.followLink(l.dest)
+					followed = true
+					break
 				}
 			}
+			if !followed && dv.kind == docMarkdown {
+				dv.selecting, dv.hasSel = true, false
+				dv.selA = g.docHit(pe.Position)
+				dv.selB = dv.selA
+			}
+		case pointer.Drag:
+			switch {
+			case dv.dragBar:
+				dv.dragTo(pe.Position.Y)
+			case dv.selecting:
+				dv.selB = g.docHit(pe.Position)
+				dv.hasSel = dv.selA != dv.selB
+				// Dragging past the top or bottom edge scrolls.
+				if pe.Position.Y < 0 {
+					dv.scrollY += pe.Position.Y / 4
+				} else if pe.Position.Y > dv.viewH {
+					dv.scrollY += (pe.Position.Y - dv.viewH) / 4
+				}
+				gtx.Execute(op.InvalidateCmd{})
+			}
+		case pointer.Release, pointer.Cancel:
+			dv.dragBar, dv.selecting = false, false
 		}
 	}
 	for _, l := range dv.links {
@@ -622,11 +725,31 @@ func (g *guiApp) docInput(gtx layout.Context, local image.Rectangle, origin imag
 	}
 }
 
+// dragTo moves the page so that the thumb, held at barGrab, follows the pointer.
+func (dv *docView) dragTo(py float32) {
+	span := dv.viewH - dv.barH
+	if span <= 0 {
+		return
+	}
+	dv.scrollY = min(max((py-dv.barGrab)/span*(dv.contentH-dv.viewH), 0), dv.contentH-dv.viewH)
+}
+
 // followLink opens a link: another document next to this one in the viewer,
 // anything on the web in the browser.
 func (g *guiApp) followLink(dest string) {
 	dv := g.doc
-	if dv == nil || dest == "" || strings.HasPrefix(dest, "#") {
+	if dv == nil || dest == "" {
+		return
+	}
+	if frag, ok := strings.CutPrefix(dest, "#"); ok {
+		if un, err := url.PathUnescape(frag); err == nil {
+			frag = un
+		}
+		if dv.md != nil {
+			if y, ok := dv.md.Anchors[strings.ToLower(frag)]; ok {
+				dv.scrollY = max(0, y+dv.margin*0.75-dv.margin*0.5)
+			}
+		}
 		return
 	}
 	if i := strings.Index(dest, ":"); i > 0 && !strings.ContainsAny(dest[:i], "/.#?") {
@@ -670,11 +793,14 @@ func openInBrowser(dest string) {
 	}
 }
 
-// drawMarkdown paints the page: a white column on white, laid out for the
+// drawMarkdown paints the page: a column on the page colour, laid out for the
 // width and text size, and scrolled.
 func (g *guiApp) drawMarkdown(gtx layout.Context, local image.Rectangle, origin image.Point) {
 	dv := g.doc
-	paint.FillShape(gtx.Ops, mdPage, clip.Rect(local).Op())
+	dv.links = dv.links[:0] // docInput already used the previous frame's
+	dark := g.th.Name == "dark"
+	pal := func(c color.NRGBA) color.NRGBA { return docPalette(c, dark) }
+	paint.FillShape(gtx.Ops, pal(mdPage), clip.Rect(local).Op())
 	px := float32(gtx.Dp(docBodyDp)) * dv.zoom
 	margin := float32(gtx.Dp(32))
 	col := min(float32(local.Dx())-2*margin, float32(gtx.Dp(docMaxText))*dv.zoom)
@@ -687,12 +813,18 @@ func (g *guiApp) drawMarkdown(gtx layout.Context, local image.Rectangle, origin 
 			return g.docShape(s, size, bold, italic, mono).w
 		})
 		dv.mdKey.w, dv.mdKey.px = col, px
+		dv.hasSel, dv.selecting = false, false // the items it points at are gone
 	}
 	dv.contentH = dv.md.Height + margin
 	dv.scrollY = min(max(dv.scrollY, 0), max(0, dv.contentH-dv.viewH))
 	x0 := (float32(local.Dx()) - col) / 2
+	dv.x0, dv.margin = x0, margin
+	lo, hi := dv.selA, dv.selB
+	if hi.less(lo) {
+		lo, hi = hi, lo
+	}
 	top, bottom := dv.scrollY-px*3, dv.scrollY+dv.viewH+px*3
-	for _, it := range dv.md.Items {
+	for idx, it := range dv.md.Items {
 		y := it.Y + margin*0.75
 		if it.Kind == mdBox {
 			if y+it.H < top || y > bottom {
@@ -700,9 +832,9 @@ func (g *guiApp) drawMarkdown(gtx layout.Context, local image.Rectangle, origin 
 			}
 			rr := image.Rect(int(x0+it.X+0.5), int(y-dv.scrollY+0.5), int(x0+it.X+max(it.W, 1)+0.5), int(y-dv.scrollY+max(it.H, 1)+0.5))
 			if it.Radius > 0 {
-				paint.FillShape(gtx.Ops, it.Color, clip.UniformRRect(rr, int(it.Radius+0.5)).Op(gtx.Ops))
+				paint.FillShape(gtx.Ops, pal(it.Color), clip.UniformRRect(rr, int(it.Radius+0.5)).Op(gtx.Ops))
 			} else {
-				paint.FillShape(gtx.Ops, it.Color, clip.Rect(rr).Op())
+				paint.FillShape(gtx.Ops, pal(it.Color), clip.Rect(rr).Op())
 			}
 			continue
 		}
@@ -711,11 +843,23 @@ func (g *guiApp) drawMarkdown(gtx layout.Context, local image.Rectangle, origin 
 		}
 		s := g.docShape(it.Text, it.Size, it.Bold, it.Italic, it.Mono)
 		at := image.Pt(int(x0+it.X), int(y-dv.scrollY))
+		if dv.hasSel && idx >= lo.item && idx <= hi.item {
+			from, to := float32(0), s.w
+			if idx == lo.item {
+				from = g.docPrefixWidth(it, lo.off)
+			}
+			if idx == hi.item {
+				to = g.docPrefixWidth(it, hi.off)
+			}
+			sel := g.th.Accent
+			sel.A = 90
+			paint.FillShape(gtx.Ops, sel, clip.Rect(image.Rect(at.X+int(from), at.Y-int(it.Size*0.95), at.X+int(to+0.5), at.Y+int(it.Size*0.3))).Op())
+		}
 		func() {
 			off := op.Offset(at).Push(gtx.Ops)
 			defer off.Pop()
 			cl := clip.Outline{Path: g.docText.Shape(s.gl)}.Op().Push(gtx.Ops)
-			paint.ColorOp{Color: it.Color}.Add(gtx.Ops)
+			paint.ColorOp{Color: pal(it.Color)}.Add(gtx.Ops)
 			paint.PaintOp{}.Add(gtx.Ops)
 			cl.Pop()
 		}()
@@ -729,7 +873,7 @@ func (g *guiApp) drawMarkdown(gtx layout.Context, local image.Rectangle, origin 
 			if it.Strike {
 				ly = at.Y - int(it.Size*0.3)
 			}
-			paint.FillShape(gtx.Ops, it.Color, clip.Rect(image.Rect(at.X, ly, at.X+int(s.w), ly+max(1, gtx.Dp(1)))).Op())
+			paint.FillShape(gtx.Ops, pal(it.Color), clip.Rect(image.Rect(at.X, ly, at.X+int(s.w), ly+max(1, gtx.Dp(1)))).Op())
 		}
 		if it.Link != "" {
 			dv.links = append(dv.links, docLink{
@@ -743,7 +887,11 @@ func (g *guiApp) drawMarkdown(gtx layout.Context, local image.Rectangle, origin 
 // drawPDF stacks the pages on a grey desk and renders the ones in view.
 func (g *guiApp) drawPDF(gtx layout.Context, local image.Rectangle) {
 	dv := g.doc
-	paint.FillShape(gtx.Ops, docDeskBg, clip.Rect(local).Op())
+	desk := docDeskBg
+	if g.th.Name == "dark" {
+		desk = color.NRGBA{R: 38, G: 42, B: 48, A: 255}
+	}
+	paint.FillShape(gtx.Ops, desk, clip.Rect(local).Op())
 	dv.mu.Lock()
 	pdf := dv.pdf
 	dv.mu.Unlock()
@@ -847,4 +995,129 @@ func (g *guiApp) renderPage(dv *docView, pdf *pdfDoc, i, width int) {
 		g.dirty.Store(true)
 		g.wake()
 	}()
+}
+
+// docPrefixWidth is how far into a text item its first off bytes reach.
+func (g *guiApp) docPrefixWidth(it mdItem, off int) float32 {
+	off = max(0, min(off, len(it.Text)))
+	if off == 0 {
+		return 0
+	}
+	return g.docShape(it.Text[:off], it.Size, it.Bold, it.Italic, it.Mono).w
+}
+
+// docHit is the place in the text nearest to a point of the view: the line
+// closest to it vertically, then the character closest along the line.
+func (g *guiApp) docHit(p f32.Point) docPos {
+	dv := g.doc
+	if dv == nil || dv.md == nil {
+		return docPos{}
+	}
+	px, py := p.X-dv.x0, p.Y+dv.scrollY
+	best, bestDY, bestDX := -1, float32(1e9), float32(1e9)
+	for i, it := range dv.md.Items {
+		if it.Kind != mdText_ || it.Text == "" {
+			continue
+		}
+		base := it.Y + dv.margin*0.75
+		dy := float32(0)
+		if py < base-it.Size {
+			dy = base - it.Size - py
+		} else if py > base+it.Size*0.3 {
+			dy = py - base - it.Size*0.3
+		}
+		if dy > bestDY+0.5 { // a farther line cannot win; do not shape it
+			continue
+		}
+		w := g.docShape(it.Text, it.Size, it.Bold, it.Italic, it.Mono).w
+		dx := float32(0)
+		if px < it.X {
+			dx = it.X - px
+		} else if px > it.X+w {
+			dx = px - it.X - w
+		}
+		if dy < bestDY-0.5 || dy < bestDY+0.5 && dx < bestDX {
+			best, bestDY, bestDX = i, dy, dx
+		}
+	}
+	if best < 0 {
+		return docPos{}
+	}
+	it := dv.md.Items[best]
+	// Widths grow along the text: binary search the character boundaries for
+	// the first one past the point, then take the nearer of it and the one before.
+	var offs []int
+	for i := 0; i <= len(it.Text); {
+		offs = append(offs, i)
+		if i == len(it.Text) {
+			break
+		}
+		_, n := utf8.DecodeRuneInString(it.Text[i:])
+		i += n
+	}
+	k := sort.Search(len(offs), func(n int) bool { return it.X+g.docPrefixWidth(it, offs[n]) >= px })
+	if k == len(offs) {
+		k = len(offs) - 1
+	} else if k > 0 && px-(it.X+g.docPrefixWidth(it, offs[k-1])) < it.X+g.docPrefixWidth(it, offs[k])-px {
+		k--
+	}
+	pos := offs[k]
+	return docPos{best, pos}
+}
+
+// docSelectionText is the selected text: the pieces of a line run together,
+// the lines are separated.
+func (dv *docView) selectionText(width func(mdItem) float32) string {
+	if !dv.hasSel || dv.md == nil {
+		return ""
+	}
+	lo, hi := dv.selA, dv.selB
+	if hi.less(lo) {
+		lo, hi = hi, lo
+	}
+	var b strings.Builder
+	lastY, lastEnd := float32(-1e9), float32(0)
+	for i := lo.item; i <= hi.item && i < len(dv.md.Items); i++ {
+		it := dv.md.Items[i]
+		if it.Kind != mdText_ {
+			continue
+		}
+		t := it.Text
+		if i == hi.item {
+			t = t[:max(0, min(hi.off, len(t)))]
+		}
+		if i == lo.item {
+			t = t[min(lo.off, len(t)):]
+		}
+		switch {
+		case b.Len() > 0 && it.Y-lastY > it.Size*0.5:
+			b.WriteByte('\n')
+		case b.Len() > 0 && it.X-lastEnd > it.Size*1.5:
+			b.WriteByte('\t') // the next table cell
+		case b.Len() > 0 && it.X-lastEnd > it.Size*0.15 && !strings.HasSuffix(b.String(), " ") && !strings.HasPrefix(t, " "):
+			b.WriteByte(' ') // a marker and its text, or words the layout trimmed
+		}
+		lastY, lastEnd = it.Y, it.X+width(it)
+		b.WriteString(t)
+	}
+	return b.String()
+}
+
+// copyDocSelection puts the selected text on the clipboard.
+func (g *guiApp) copyDocSelection(gtx layout.Context) bool {
+	if g.doc == nil {
+		return false
+	}
+	text := g.doc.selectionText(func(it mdItem) float32 {
+		return g.docShape(it.Text, it.Size, it.Bold, it.Italic, it.Mono).w
+	})
+	if text == "" {
+		return false
+	}
+	gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(text))})
+	gtx.Execute(op.InvalidateCmd{}) // see termView.copySelection
+	if guiMac {
+		go copyToSystemClipboard(text)
+	}
+	return true
 }

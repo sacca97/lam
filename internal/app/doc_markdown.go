@@ -3,9 +3,12 @@
 package app
 
 import (
+	"fmt"
 	"image/color"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -18,7 +21,8 @@ import (
 // window: the caller measures text, the layout wraps and stacks it, and the
 // window paints the items. That keeps the layout testable with a fake ruler.
 
-// Colours of the reader: a white page, whatever the window's theme.
+// Colours of the reader: a white page; the window paints them through
+// docPalette when its theme is dark.
 var (
 	mdPage    = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	mdText    = color.NRGBA{R: 31, G: 35, B: 40, A: 255}
@@ -55,15 +59,47 @@ type mdItem struct {
 
 // mdLayout is a laid-out document.
 type mdLayout struct {
-	Items  []mdItem
-	Height float32
+	Items   []mdItem
+	Height  float32
+	Anchors map[string]float32 // heading slugs (#like-this) and where they start
+}
+
+// headingSlug is the id GitHub gives a heading: lower case, spaces as
+// hyphens, punctuation dropped.
+func headingSlug(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), r == '-', r == '_':
+			b.WriteRune(r)
+		case r == ' ':
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// anchor records a heading's place; a second heading of the same name is
+// name-1, as on GitHub.
+func (b *mdBuilder) anchor(title string) {
+	slug := headingSlug(title)
+	if slug == "" {
+		return
+	}
+	for n := 1; ; n++ {
+		if _, taken := b.out.Anchors[slug]; !taken {
+			b.out.Anchors[slug] = b.y
+			return
+		}
+		slug = fmt.Sprintf("%s-%d", headingSlug(title), n)
+	}
 }
 
 // layoutMarkdown lays source out at the given content width and body size.
 func layoutMarkdown(source []byte, width, size float32, ruler mdRuler) *mdLayout {
 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
 	root := md.Parser().Parse(text.NewReader(source))
-	b := &mdBuilder{src: source, ruler: ruler, size: size, out: &mdLayout{}}
+	b := &mdBuilder{src: source, ruler: ruler, size: size, out: &mdLayout{Anchors: map[string]float32{}}}
 	b.blocks(root, 0, width)
 	b.out.Height = b.y + size
 	return b.out
@@ -108,6 +144,7 @@ func (b *mdBuilder) block(n ast.Node, x, width float32) {
 		if n.Level == 6 {
 			c = mdDim
 		}
+		b.anchor(string(n.Text(b.src)))
 		b.leading = 1.25
 		b.paragraph(n, x, width, sz, c, true)
 		b.leading = 0
@@ -615,7 +652,7 @@ func (b *mdBuilder) table(t *east.Table, x, width float32) {
 		if !heads[ri] && ri%2 == 0 {
 			// The background goes under what was just added.
 			bg := mdItem{Kind: mdBox, X: x, Y: rowTop, W: sumF(colW), H: h, Color: mdCodeBg}
-			b.out.Items = append(b.out.Items[:rowBg], append([]mdItem{bg}, b.out.Items[rowBg:]...)...)
+			b.out.Items = slices.Insert(b.out.Items, rowBg, bg)
 		}
 		b.y = rowTop + h
 		b.add(mdItem{Kind: mdBox, X: x, Y: b.y, W: sumF(colW), H: 1, Color: mdRule})
@@ -648,4 +685,29 @@ func sameRun(a, b mdWord) bool {
 	}
 	return a.bold == b.bold && a.italic == b.italic && a.mono == b.mono && a.strike == b.strike &&
 		a.link == b.link && a.color == b.color && a.background == b.background && a.size == b.size
+}
+
+// docPalette is how a colour of the light page looks in the dark theme: the
+// same roles on a dark page. Colours it does not know pass through.
+func docPalette(c color.NRGBA, dark bool) color.NRGBA {
+	if !dark {
+		return c
+	}
+	switch c {
+	case mdPage:
+		return color.NRGBA{R: 21, G: 24, B: 29, A: 255}
+	case mdText:
+		return color.NRGBA{R: 230, G: 237, B: 243, A: 255}
+	case mdDim:
+		return color.NRGBA{R: 145, G: 152, B: 161, A: 255}
+	case mdLink:
+		return color.NRGBA{R: 88, G: 166, B: 255, A: 255}
+	case mdCodeBg:
+		return color.NRGBA{R: 30, G: 35, B: 42, A: 255}
+	case mdRule:
+		return color.NRGBA{R: 48, G: 54, B: 61, A: 255}
+	case mdInlineB:
+		return color.NRGBA{R: 43, G: 49, B: 57, A: 255}
+	}
+	return c
 }

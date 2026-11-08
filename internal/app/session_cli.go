@@ -3,7 +3,6 @@ package app
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -136,7 +135,7 @@ func createCLISession(request cliSessionRequest) (sessionInfo, error) {
 		if err != nil {
 			return sessionInfo{}, fmt.Errorf("list sessions: %w", err)
 		}
-		name = generatedSessionName(nameKind, cwd, sessions)
+		name = generatedSessionName(nameKind, sessions)
 	}
 	if err := validSessionName(name); err != nil {
 		return sessionInfo{}, err
@@ -165,41 +164,34 @@ func sessionCommand(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
-// launcherSessionName names a session started with a launcher from the tool
-// and folder, such as claude-os-findmy. A plain terminal is called "shell".
-func launcherSessionName(launcher, cwd string, sessions []sessionInfo) string {
+// launcherSessionName names a session started with a launcher after the tool:
+// claude, claude-1, claude-2. The folder is shown beside the name, so it is not
+// part of it. A plain terminal is called "shell".
+func launcherSessionName(launcher string, sessions []sessionInfo) string {
 	if launcher == "terminal" {
 		launcher = "shell"
 	}
-	return generatedSessionName(launcher, cwd, sessions)
+	return generatedSessionName(launcher, sessions)
 }
 
-// generatedSessionName is kind plus the last folder of cwd, with -1, -2, ...
-// added when a session of that name exists.
-func generatedSessionName(kind, cwd string, sessions []sessionInfo) string {
+// generatedSessionName is kind, with -1, -2, ... added when a session of that
+// name exists.
+func generatedSessionName(kind string, sessions []sessionInfo) string {
 	if kind == "" {
 		kind = "session"
 	}
-	base := filepath.Base(filepath.Clean(cwd))
-	if base == string(os.PathSeparator) {
-		base = "root"
+	kind = sessionNameSlug(kind)
+	if kind == "" {
+		kind = "session"
 	}
-	base = sessionNameSlug(base)
-	if base == "" {
-		base = "project"
-	}
-	if len(base) > 48 {
-		base = strings.Trim(base[:48], "-")
-	}
-	prefix := kind + "-" + base
 	used := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
 		used[session.Name] = struct{}{}
 	}
 	for suffix := 0; ; suffix++ {
-		name := prefix
+		name := kind
 		if suffix > 0 {
-			name = fmt.Sprintf("%s-%d", prefix, suffix)
+			name = fmt.Sprintf("%s-%d", kind, suffix)
 		}
 		if _, exists := used[name]; !exists {
 			return name

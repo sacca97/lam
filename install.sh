@@ -77,6 +77,11 @@ curl -fsSL -o "$tmp/lam" "$base/$name" || { echo "  No $os/$arch build in releas
 # GitHub records a SHA-256 digest for each release asset; check it when it is there.
 want="$(curl -fsSL "${LAM_API_BASE:-https://api.github.com/repos/$repo/releases}/tags/$tag" 2>/dev/null |
     awk -v n="$name" '/"name":/ {cur = ($0 ~ "\"" n "\"")} cur && /"digest":/ {gsub(/.*sha256:|".*/, ""); print; exit}')"
+if [ -z "$want" ] && [ "${LAM_SKIP_VERIFY:-}" != 1 ]; then
+    echo "  Could not get the SHA-256 for $name from GitHub; not installing." >&2
+    echo "  Set LAM_SKIP_VERIFY=1 to install without checking." >&2
+    exit 1
+fi
 if [ -n "$want" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
         got="$(sha256sum "$tmp/lam" | awk '{print $1}')"

@@ -51,7 +51,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks and
 
 ```sh
 lam                                      # open the shared session list
-lam ~/Projects/api                       # set the default directory for new sessions
+lam ~/Projects/api                       # terminal interface, default directory for new sessions
 lam start                                # create a shell session and open it
 lam start codex ~/Projects/api           # start Codex in that directory
 lam start claude ../repo --cmd --resume  # pass extra arguments to Claude
@@ -71,13 +71,13 @@ window can open (a terminal-only build, no display, or a plain SSH login).
 Wayland/EGL development files are there (otherwise it is terminal-only); on macOS it installs
 `~/Applications/lam.app`, signed ad hoc, and `~/.local/bin/lam` points into it.
 
-In the window, `Ctrl+Shift+D` (`⌘D` on a Mac) opens a small file browser, starting in the folder of the selected session, that lists its folders and its markdown and PDF files (click one, or type a path; the buttons and the path above the list, or `Alt+←`/`Alt+→`/`Alt+↑`, go back, forward and up a folder); the file opens as a tab next to the session's, from the machine
+`Ctrl+Shift+K` (`⌘K` on a Mac) opens the command palette: type part of a session's name or of an action (new session, open a document, connect, settings, group by, rename, stop) and press Enter. A session can also be shown beside the one in front (its menu, or the palette: *Show … beside*), in the pane the terminal uses; `Ctrl+Shift+T` or the cross closes it. Messages stack at the bottom and go by themselves or when clicked, the window title carries the number of unread sessions, and an unread session's row has a faint tint. In a terminal, `Ctrl`-click (`⌘`-click on a Mac) on a web address opens the browser, and on a `.md` or `.pdf` path, such as one an agent just wrote, opens it in the viewer (a link is underlined while the pointer is over it): a relative path starts in the session's folder, and the file is read on the machine the session runs on. In the window, `Ctrl+Shift+D` (`⌘D` on a Mac) opens a small file browser, starting in the folder of the selected session, that lists its folders and its markdown and PDF files (click one, or type a path; the buttons and the path above the list, or `Alt+←`/`Alt+→`/`Alt+↑`, go back, forward and up a folder); the file opens as a tab next to the session's, from the machine
 of the session you are looking at, including a host connected over SSH (the file is read over the same
-connection). Markdown is drawn on a white page with tables, task lists and code blocks; a relative link to
-another `.md` or `.pdf` opens it in place and other links open in the browser. PDFs are rendered page by
+connection). Markdown is drawn on a page that follows the theme (white in the light one) with tables, task lists and code blocks; drag to select text and `Ctrl+C` (`⌘C`) copies it, a `#heading` link scrolls to the heading, a relative link to
+another `.md` or `.pdf` opens it in place and other links open in the browser. The scroll bar can be dragged, and a button in the title bar opens a document. PDFs are rendered page by
 page (the renderer is PDFium, built into the window version of `lam`, nothing to install); scroll with the
-wheel or the keys, zoom with `Ctrl` and the wheel or `Ctrl+=`/`Ctrl+-`, `R` reloads. Several files can be open at once; each is a tab with a cross, `Ctrl+W` (`⌘W` on a Mac) closes the one in front, and `Ctrl+Tab` goes round the tabs. Files up
-to 8 MB (markdown) and 128 MB (PDF) open.
+wheel or the keys, zoom with `Ctrl` and the wheel or `Ctrl+=`/`Ctrl+-`, `R` reloads. Several files can be open at once; each is a tab with a cross (a click of the wheel on a tab closes it too), `Ctrl+W` (`⌘W` on a Mac) closes the one in front, and `Ctrl+Tab` goes round the tabs. Files up
+to 2 MB (markdown) and 128 MB (PDF) open.
 
 `lam` opens the shared session list, so you do not need to name or attach to an existing session
 to get back to it. `lam attach <session>` remains available when you want to connect directly to
@@ -105,7 +105,7 @@ In the Sessions view:
 
 - `↑` / `↓` moves the selection; `Enter` focuses the selected session and `1`–`9` selects one directly.
 - `/` filters by session name or directory. `n` creates a session, `r` renames it, and `k` stops it after confirmation.
-- New sessions are named after the tool and the last folder of their directory, such as `claude-os-findmy`, with `-1`, `-2`, … added when that name is taken. Rename with `r`.
+- New sessions are named after the tool, `claude`, then `claude-1`, `claude-2`, … when that name is taken; the folder is shown beside the name. Rename with `r`.
 - The new-session choices include `Terminal`, which opens a shell instead of an agent.
 - `t` (or `Alt+T` from any focus) toggles a terminal for the selected session. It starts in that session's working directory and is placed to the right of the session pane (40% of its width) by default. Click either pane or use `Ctrl+Space` to switch focus. Press `s` for settings: the terminal can sit on the right or below the session pane, at 30%, 40% or 50% of the width or height. The choice is saved. On narrow windows the terminal falls back to below.
 - `Ctrl+Space` or `Ctrl+\` switches focus between the sidebar and main pane. When the integrated terminal is open, the shortcuts cycle through the sidebar, session, and terminal. Clicking a pane also focuses it.

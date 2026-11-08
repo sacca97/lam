@@ -155,12 +155,7 @@ func resumeCommand(command string) string {
 	switch commandName(command) {
 	case "claude":
 		if hasQuote {
-			// A starting prompt must not be sent again.
-			base := "claude"
-			if strings.Contains(command, "--permission-mode auto") {
-				base += " --permission-mode auto"
-			}
-			return base + " --continue"
+			return withoutStartPrompt(command) + " --continue"
 		}
 		if hasFlag("--continue", "-c", "--resume", "-r") {
 			return command
@@ -181,7 +176,7 @@ func resumeCommand(command string) string {
 			base += " --mode auto"
 		}
 		if hasQuote {
-			return base + " --continue"
+			return withoutStartPrompt(command) + " --continue"
 		}
 		if hasFlag("--continue", "-c", "--conversation") {
 			return command
@@ -189,7 +184,7 @@ func resumeCommand(command string) string {
 		return base + " --continue"
 	case "pi", "omp", "opencode":
 		if hasQuote {
-			return fields[0] + " --continue"
+			return withoutStartPrompt(command) + " --continue"
 		}
 		if hasFlag("--continue", "-c", "--session", "-s") {
 			return command
@@ -285,4 +280,62 @@ func restoreNamed(names []string) (int, []string) {
 		}
 	}
 	return restoreSessions(entries)
+}
+
+// withoutStartPrompt is command without the prompt the agent was started with,
+// which must not be sent again, and with every other argument kept, a quoted
+// flag value such as --add-dir "/tmp/my dir" among them.
+func withoutStartPrompt(command string) string {
+	type word struct {
+		text   string
+		quoted bool
+	}
+	var words []word
+	var cur strings.Builder
+	var quote rune
+	inWord, quoted := false, false
+	flush := func() {
+		if inWord {
+			words = append(words, word{cur.String(), quoted})
+		}
+		cur.Reset()
+		inWord, quoted = false, false
+	}
+	for _, r := range command {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote, inWord, quoted = r, true, true
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+			inWord = true
+		}
+	}
+	flush()
+	var out []string
+	for i, w := range words {
+		prev := ""
+		if i > 0 {
+			prev = words[i-1].text
+		}
+		if w.quoted && (!strings.HasPrefix(prev, "-") || prev == "--" || strings.Contains(prev, "prompt")) {
+			if len(out) > 0 && (prev == "--" || strings.Contains(prev, "prompt")) && strings.HasPrefix(prev, "-") {
+				out = out[:len(out)-1] // the flag that introduced the prompt goes with it
+			}
+			continue
+		}
+		if w.quoted || strings.ContainsAny(w.text, " \t") {
+			out = append(out, shellQuote(w.text))
+		} else {
+			out = append(out, w.text)
+		}
+	}
+	return strings.Join(out, " ")
 }

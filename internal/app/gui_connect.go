@@ -85,9 +85,11 @@ func (g *guiApp) startConnect(host string) {
 	g.connID++
 	id := g.connID
 	d.busy, d.err = true, ""
-	builtinSSH = true
 	usedStored := new(atomic.Value) // the keychain account tried
+	sshGlobalsMu.Lock()
+	builtinSSH = true
 	guiSSHOptions = func(unattended bool) SSHOptions { return g.sshOptions(id, unattended, usedStored) }
+	sshGlobalsMu.Unlock()
 	knownTailnet := append([]string(nil), g.settings.TailnetHosts...)
 	autoUp := g.settings.TailscaleAutoUp
 	go func() {
@@ -325,9 +327,11 @@ func (g *guiApp) switchBackend(b SessionBackend) {
 				delete(g.attachFail, n)
 			}
 		}
+		g.mu.Lock()
 		if strings.HasPrefix(g.selected, hostPrefix(oldHost)) {
 			g.selected, g.termVisible = "", false
 		}
+		g.mu.Unlock()
 	}
 	g.gen.Add(1) // a refresh of the old host in flight must not land
 	old := g.mb.SetRemote(b)
@@ -335,7 +339,7 @@ func (g *guiApp) switchBackend(b SessionBackend) {
 	if c, ok := old.(interface{ Close() }); ok {
 		go c.Close()
 	}
-	g.remote = b != nil
+	g.remote.Store(b != nil)
 	g.finishes.reset()
 	g.mu.Lock()
 	g.sessions = slices.DeleteFunc(slices.Clone(g.sessions), func(s sessionInfo) bool { return s.Host != "" })

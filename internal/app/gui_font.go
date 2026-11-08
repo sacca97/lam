@@ -465,6 +465,9 @@ func (t *termFont) glyph(text string, style uint8, span int) *glyphMask {
 	if g, ok := t.glyphs[k]; ok {
 		return g
 	}
+	if len(t.glyphs) >= 16384 { // a program printing endless unique text; masks come back on demand
+		clear(t.glyphs)
+	}
 	g := t.rasterize(text, style, span)
 	t.glyphs[k] = g
 	return g
@@ -613,6 +616,9 @@ func (fb *fallbackFonts) faceLocked(f *fontFile, px float64) font.Face {
 	if err != nil {
 		return nil
 	}
+	if len(fb.faces) >= 32 { // faces of sizes the text no longer has
+		clear(fb.faces)
+	}
 	fb.faces[k] = face
 	return face
 }
@@ -663,6 +669,9 @@ func (fb *fallbackFonts) lookup(r rune) {
 		}
 	}
 	fb.mu.Lock()
+	if len(fb.byRune) >= 4096 {
+		clear(fb.byRune)
+	}
 	fb.byRune[r] = found
 	delete(fb.pending, r)
 	fb.mu.Unlock()

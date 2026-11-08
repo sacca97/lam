@@ -972,7 +972,7 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 			if emptyShell == nil && !emptyShellStarted {
 				emptyShellStarted = true
 				w, h := paneSize()
-				managedShellName = launcherSessionName("terminal", launchDir, sessions)
+				managedShellName = launcherSessionName("terminal", sessions)
 				managedShellNames[managedShellName] = struct{}{}
 				p, err := startShellEmbedded(managedShellName, launchDir, w, h, dirty)
 				if err != nil {
@@ -2787,7 +2787,7 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 					if cwd == "" {
 						cwd = launchDir
 					}
-					name := launcherSessionName(launch.provider, cwd, sessions)
+					name := launcherSessionName(launch.provider, sessions)
 					if err := newSession(name, cwd, launch.command); err != nil {
 						message = fmt.Sprintf("Start %s: %v", launch.provider, err)
 					} else {

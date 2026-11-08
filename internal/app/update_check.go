@@ -34,7 +34,7 @@ func readUpdateRecord() updateRecord {
 func writeUpdateRecord(r updateRecord) {
 	if data, err := json.Marshal(r); err == nil {
 		_ = os.MkdirAll(stateDir(), 0o755)
-		_ = os.WriteFile(updateRecordPath(), data, 0o644)
+		_ = writeFileAtomic(updateRecordPath(), data, 0o644)
 	}
 }
 

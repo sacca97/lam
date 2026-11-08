@@ -66,7 +66,12 @@ type termView struct {
 	curOp      paint.ImageOp // the block cursor's image, kept while its key holds
 	curKey     cursorKey
 	gbuf       []byte
-	onPress    func() // a click in the pane: it takes the keyboard
+	onPress    func()            // a click in the pane: it takes the keyboard
+	onLink     func(string) bool // a Ctrl or Cmd click on a link: reports whether it opened
+	link       termLink          // the link under the pointer while Ctrl or Cmd is held
+	linkRow    int
+	linkOn     bool
+	linkKey    func() bool // whether Ctrl (or Cmd) is down now
 	pressed    pointer.Buttons
 	reported   bool // the press in progress went to the program, not to selection
 	// Smooth scrolling: sub is how many pixels of the row above the viewport
@@ -565,6 +570,7 @@ func (v *termView) Layout(gtx layout.Context, focused bool) layout.Dimensions {
 		cl.Pop()
 		st.Pop()
 	}
+	v.drawLink(gtx, cw, ch, sub)
 	v.drawCursor(gtx, focused, cw, ch)
 	v.drawScrollbar(gtx, size)
 	return layout.Dimensions{Size: size}
@@ -751,6 +757,7 @@ func (v *termView) handlePointer(gtx layout.Context, size image.Point) {
 			onBar := hasBar && ev.Position.X >= float32(track.Min.X-gtx.Dp(6))
 			switch ev.Kind {
 			case pointer.Move, pointer.Leave:
+				v.hoverLink(gtx, ev, cell)
 				hover := ev.Kind == pointer.Move && onBar
 				if hover != v.hoverBar {
 					v.hoverBar = hover
@@ -770,6 +777,11 @@ func (v *termView) handlePointer(gtx layout.Context, size image.Point) {
 					v.sbDrag = true
 					v.dragScrollbar(ev.Position.Y, track, thumb)
 					continue
+				}
+				if v.onLink != nil && ev.Buttons.Contain(pointer.ButtonPrimary) && ev.Modifiers&(key.ModCtrl|key.ModCommand) != 0 {
+					if l, ok := v.linkAtCell(cell.X, cell.Y); ok && v.onLink(l.tok) {
+						continue
+					}
 				}
 				v.reported = v.modes.mouse && !ev.Modifiers.Contain(key.ModShift)
 				if v.reported {
@@ -1095,4 +1107,32 @@ func (v *termView) typed() {
 	v.clearSelection()
 	v.scrollToBottom()
 	v.blinkStart = time.Now()
+}
+
+// hoverLink notes the link under the pointer.
+func (v *termView) hoverLink(gtx layout.Context, ev pointer.Event, cell image.Point) {
+	var l termLink
+	on := false
+	if ev.Kind == pointer.Move && !v.sel.dragging {
+		l, on = v.linkAtCell(cell.X, cell.Y)
+	}
+	if on != v.linkOn || on && (l != v.link || cell.Y != v.linkRow) {
+		v.link, v.linkRow, v.linkOn = l, cell.Y, on
+		gtx.Execute(op.InvalidateCmd{})
+	}
+}
+
+// drawLink underlines the link under the pointer, and shows the hand while
+// Ctrl (or Cmd) is down, which is what a click needs to open it.
+func (v *termView) drawLink(gtx layout.Context, cw, ch, sub int) {
+	if !v.linkOn {
+		return
+	}
+	r := image.Rect(v.link.lo*cw, v.linkRow*ch+sub, (v.link.hi+1)*cw, (v.linkRow+1)*ch+sub)
+	paint.FillShape(gtx.Ops, v.th.Accent, clip.Rect(image.Rect(r.Min.X, r.Max.Y-max(1, gtx.Dp(1)), r.Max.X, r.Max.Y)).Op())
+	if v.linkKey != nil && v.linkKey() {
+		area := clip.Rect(r).Push(gtx.Ops)
+		pointer.CursorPointer.Add(gtx.Ops)
+		area.Pop()
+	}
 }

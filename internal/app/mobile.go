@@ -120,7 +120,7 @@ func (l *MobileLink) CreateSession(launcher, dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := launcherSessionName(launcher, cwd, existing)
+	name := launcherSessionName(launcher, existing)
 	if err := l.b.Create(name, cwd, command); err != nil {
 		return "", err
 	}

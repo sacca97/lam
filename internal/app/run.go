@@ -108,6 +108,7 @@ func Run() {
 					promptMe = true
 				} else if arg == "--builtin" {
 					builtinSSH = true
+					os.Setenv("LAM_SSH", "builtin") // the window is a new process
 				} else if arg == "--tui" {
 					tui = true
 				} else {

@@ -71,12 +71,15 @@ func (g *guiApp) pickRefresh() {
 		return
 	}
 	dir, _ := pickSplit(d.field.String())
+	g.mu.Lock() // the listing goroutine writes these under it
 	if dir == pk.dir && (pk.loading || pk.all != nil || pk.err != "") {
+		g.mu.Unlock()
 		return
 	}
 	pk.dir, pk.loading, pk.err, pk.all = dir, true, "", nil
 	pk.gen++
 	gen := pk.gen
+	g.mu.Unlock()
 	completer, _ := g.documentSourceFor(pk.host).(documentCompleter)
 	go func() {
 		var entries []docEntry

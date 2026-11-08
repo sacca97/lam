@@ -130,7 +130,7 @@ func vaultAccounts() []string {
 
 func vaultIndexWrite(list []string) {
 	_ = os.MkdirAll(stateDir(), 0o700)
-	_ = os.WriteFile(vaultIndexPath(), []byte(strings.Join(list, "\n")+"\n"), 0o600)
+	_ = writeFileAtomic(vaultIndexPath(), []byte(strings.Join(list, "\n")+"\n"), 0o600)
 }
 
 func vaultIndexAdd(account string) {

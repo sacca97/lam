@@ -22,6 +22,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"golang.org/x/term"
 )
@@ -123,7 +124,7 @@ type sessionMeta struct {
 
 // validSessionName rejects names that cannot be used as a socket file name.
 func validSessionName(name string) error {
-	if name == "" || strings.HasPrefix(name, ".") || strings.ContainsAny(name, "/\x00\n\t") {
+	if name == "" || strings.HasPrefix(name, ".") || strings.ContainsAny(name, "/\x00\n\t") || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 		return fmt.Errorf("invalid session name %q", name)
 	}
 	return nil
@@ -148,9 +149,26 @@ func sockDead(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
 }
 
+// sessionGone is sockDead for a session of this machine, but a refused
+// connection only counts when its host process is gone too: a busy host that
+// is slow to accept must not lose its socket and metadata.
+func sessionGone(name string, err error) bool {
+	if !sockDead(err) {
+		return false
+	}
+	if errors.Is(err, syscall.ENOENT) {
+		return true
+	}
+	meta, merr := readSessionMeta(name)
+	if merr != nil || meta.HostPID <= 0 {
+		return true
+	}
+	return syscall.Kill(meta.HostPID, 0) == syscall.ESRCH
+}
+
 func removeSessionFiles(name string) {
+	os.Remove(sessionMetaFile(name)) // first: a new session of this name may start once the socket is gone
 	os.Remove(sessionSocket(name))
-	os.Remove(sessionMetaFile(name))
 	// What the agent and the daemon left in /tmp for this session: a stale unread
 	// marker would also mark a later session of the same name.
 	os.Remove(fmt.Sprintf("/tmp/claude-status-%s", name))
@@ -186,14 +204,19 @@ func (nativeBackend) Create(name, cwd, command string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go cmd.Wait() // reap the host when it exits; it does not depend on us
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }() // reap the host when it exits; it does not depend on us
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if conn, err := connectSession(name, 200*time.Millisecond); err == nil {
 			conn.Close()
 			return nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-exited:
+			return fmt.Errorf("session %q did not start: the host exited", name)
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("session %q did not start", name)
 }
@@ -243,10 +266,13 @@ func (nativeBackend) List() ([]sessionInfo, error) {
 	}
 	probed := make([]*sessionInfo, len(names))
 	var wg sync.WaitGroup
+	slots := make(chan struct{}, 32) // hundreds of sessions must not open hundreds of sockets at once
 	for i, name := range names {
 		wg.Add(1)
+		slots <- struct{}{}
 		go func() {
 			defer wg.Done()
+			defer func() { <-slots }()
 			probed[i] = probeSession(name)
 		}()
 	}
@@ -273,7 +299,7 @@ func probeSession(name string) *sessionInfo {
 	}
 	conn, err := connectSession(name, 300*time.Millisecond)
 	if err != nil {
-		if sockDead(err) {
+		if sessionGone(name, err) {
 			removeSessionFiles(name)
 		}
 		return nil
@@ -388,7 +414,7 @@ func (nativeBackend) Kill(name string) error {
 	manifestForget(name) // stopping on purpose: do not offer to restore it
 	conn, err := connectSession(name, time.Second)
 	if err != nil {
-		if sockDead(err) {
+		if sessionGone(name, err) {
 			removeSessionFiles(name)
 		}
 		return fmt.Errorf("no such session %q", name)
@@ -540,7 +566,7 @@ func runAttachAndRemember(name string) error {
 func runAttach(name string) error {
 	conn, err := connectSession(name, 2*time.Second)
 	if err != nil {
-		if sockDead(err) {
+		if sessionGone(name, err) {
 			removeSessionFiles(name)
 		}
 		return fmt.Errorf("no such session %q", name)

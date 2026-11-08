@@ -91,7 +91,7 @@ func TestCreateCLISessionWithoutCommandStartsShellInCurrentDirectory(t *testing.
 	if backend.created.CWD != dir {
 		t.Fatalf("created cwd = %q, want %q", backend.created.CWD, dir)
 	}
-	if backend.created.Name != generatedSessionName("shell", dir, nil) {
+	if backend.created.Name != generatedSessionName("shell", nil) {
 		t.Fatalf("created name = %q, want shell name for %q", backend.created.Name, dir)
 	}
 	if backend.created.Command != fallbackShellCommand {
@@ -135,8 +135,8 @@ func TestSessionCommandPreservesShellTextAndArgumentBoundaries(t *testing.T) {
 }
 
 func TestGeneratedSessionNameAvoidsCollisions(t *testing.T) {
-	sessions := []sessionInfo{{Name: "session-my-project"}, {Name: "session-my-project-1"}}
-	if got, want := generatedSessionName("session", "/work/My Project", sessions), "session-my-project-2"; got != want {
+	sessions := []sessionInfo{{Name: "session"}, {Name: "session-1"}}
+	if got, want := generatedSessionName("session", sessions), "session-2"; got != want {
 		t.Fatalf("generatedSessionName() = %q, want %q", got, want)
 	}
 }
@@ -157,24 +157,24 @@ func TestDaemonServiceDefinitionsLeaveSessionsAlone(t *testing.T) {
 	}
 }
 
-func TestLauncherSessionNameUsesToolAndLastFolder(t *testing.T) {
+func TestLauncherSessionNameIsTheTool(t *testing.T) {
 	for _, tc := range []struct {
 		launcher, cwd string
 		taken         []string
 		want          string
 	}{
-		{"claude", "/home/me/Projects/os-findmy", nil, "claude-os-findmy"},
-		{"claude", "/home/me/Projects/os-findmy", []string{"claude-os-findmy"}, "claude-os-findmy-1"},
-		{"claude", "/home/me/Projects/os-findmy", []string{"claude-os-findmy", "claude-os-findmy-1"}, "claude-os-findmy-2"},
-		{"codex", "/home/me/Projects/os-findmy", []string{"claude-os-findmy"}, "codex-os-findmy"},
-		{"claude", "Projects/test", nil, "claude-test"},
-		{"terminal", "/srv/app/", nil, "shell-app"},
+		{"claude", "/home/me/Projects/os-findmy", nil, "claude"},
+		{"claude", "/home/me/Projects/os-findmy", []string{"claude"}, "claude-1"},
+		{"claude", "/elsewhere", []string{"claude", "claude-1"}, "claude-2"},
+		{"codex", "/home/me/Projects/os-findmy", []string{"claude"}, "codex"},
+		{"claude", "Projects/test", []string{"claude-os-findmy"}, "claude"},
+		{"terminal", "/srv/app/", nil, "shell"},
 	} {
 		var sessions []sessionInfo
 		for _, name := range tc.taken {
 			sessions = append(sessions, sessionInfo{Name: name})
 		}
-		if got := launcherSessionName(tc.launcher, tc.cwd, sessions); got != tc.want {
+		if got := launcherSessionName(tc.launcher, sessions); got != tc.want {
 			t.Errorf("launcherSessionName(%q, %q, %v) = %q, want %q", tc.launcher, tc.cwd, tc.taken, got, tc.want)
 		}
 	}

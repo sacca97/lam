@@ -136,14 +136,16 @@ func (e *termEmu) Write(p []byte) {
 // a private-mode sequence (CSI ?), a soft reset (CSI ! p) or a full reset
 // (ESC c). Checking first keeps the common case, plain output, cheap.
 func (e *termEmu) mayChangeModes(p []byte) bool {
-	seqs := [][]byte{[]byte("\x1b[?"), []byte("\x1b[!p"), []byte("\x1bc")}
-	joined := append(append([]byte(nil), e.tail...), p[:min(len(p), 4)]...)
 	changed := false
-	for _, seq := range seqs {
-		if bytes.Contains(p, seq) || bytes.Contains(joined, seq) {
-			changed = true
-			break
-		}
+	if bytes.IndexByte(p, 0x1b) >= 0 { // no escape, no sequence in this chunk
+		changed = bytes.Contains(p, []byte("\x1b[?")) || bytes.Contains(p, []byte("\x1b[!p")) || bytes.Contains(p, []byte("\x1bc"))
+	}
+	if !changed && len(e.tail) > 0 { // a sequence split across two writes
+		var joined [7]byte // the 3 kept bytes and the first 4 of p
+		n := copy(joined[:], e.tail)
+		n += copy(joined[n:], p[:min(len(p), 4)])
+		j := joined[:n]
+		changed = bytes.Contains(j, []byte("\x1b[?")) || bytes.Contains(j, []byte("\x1b[!p")) || bytes.Contains(j, []byte("\x1bc"))
 	}
 	e.tail = append(e.tail[:0], p[max(0, len(p)-3):]...)
 	return changed

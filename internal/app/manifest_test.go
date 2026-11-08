@@ -92,3 +92,16 @@ func TestLauncherCmdStartsAgentsInAutoMode(t *testing.T) {
 		t.Errorf("with a prompt: %q", got)
 	}
 }
+
+func TestResumeKeepsQuotedFlagValues(t *testing.T) {
+	for in, want := range map[string]string{
+		`claude --add-dir "/tmp/my dir"`:                     `claude --add-dir '/tmp/my dir' --continue`,
+		`claude --permission-mode auto 'fix the bug'`:        `claude --permission-mode auto --continue`,
+		`agy --mode auto --prompt-interactive 'hello there'`: `agy --mode auto --continue`,
+		`pi -- 'do it'`: `pi --continue`,
+	} {
+		if got := resumeCommand(in); got != want {
+			t.Errorf("resumeCommand(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

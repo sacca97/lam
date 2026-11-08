@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path"
 	"runtime"
 	"slices"
 	"strings"
@@ -76,13 +77,14 @@ type guiApp struct {
 	moreShown, moreNext string // the session whose three dots are shown, last frame and this one
 	plusShown, plusNext string // the same for the + on a project heading
 	pathSource          sessionDirectorySource
-	remote              bool
+	remote              atomic.Bool
 	doc                 *docView   // the document in front, or nil when a session is
 	docs                []*docView // the open documents, as tabs
 	docText             *text.Shaper
 	docSans             font.Typeface
 	docShapes           map[docShapeKey]docShaped
-	mb                  *multiBackend // this machine's sessions and the connected host's
+	docShapesOld        map[docShapeKey]docShaped // the generation before: a full cache drops the older half, not everything
+	mb                  *multiBackend             // this machine's sessions and the connected host's
 	restorer            sessionRestorer
 	upd                 guiUpdate // the newer release, if any, and the install
 
@@ -102,16 +104,25 @@ type guiApp struct {
 	connRes       *connectResult // a finished connection attempt
 
 	// Everything below belongs to the UI goroutine.
-	connID    int          // the connection attempt that counts
-	gen       atomic.Int64 // counts backend switches
-	askPrev   dialog       // the connect dialog, while a question covers it
-	selected  string
-	filter    string
-	collapsed map[string]bool
-	focus     guiFocus
-	rowCache  rowCache
-	nextAge   time.Time // the soonest a visible age label changes
-	shapes    map[shapeKey]shapedLine
+	connID     int          // the connection attempt that counts
+	gen        atomic.Int64 // counts backend switches
+	askPrev    dialog       // the connect dialog, while a question covers it
+	selected   string
+	filter     string
+	title      string // the window title now set
+	toasts     []toast
+	sideAnim   float32 // how far the sidebar is out: 0 hidden, 1 shown
+	sideAt     time.Time
+	sideInit   bool
+	beside     string // a second session shown next to the one in front
+	besidePane *embedded
+	filterEd   textField // the search field's editor; filter is its text
+	collapsed  map[string]bool
+	focus      guiFocus
+	rowCache   rowCache
+	nextAge    time.Time // the soonest a visible age label changes
+	shapes     map[shapeKey]shapedLine
+	shapesOld  map[shapeKey]shapedLine
 
 	main       *embedded
 	mainView   *termView
@@ -133,17 +144,26 @@ type guiApp struct {
 	buttons   map[string]*widget.Clickable
 	hits      map[string]bool // buttons clicked, read before they are laid out
 	list      layout.List
-	keyTag    bool
-	lastMods  key.Modifiers
-	skipEdits bool // drop typed text until the next key press
-	hideSide  bool
-	sideHost  string // the machine whose sessions the sidebar lists; "" is this one
-	holdName  string // a session read by selecting it stays under Unread until another is selected
-	sideTag   bool   // sidebar edge drag
-	splitTag  bool   // terminal divider drag
-	dragging  int    // 0 none, 1 sidebar edge, 2 divider
-	lastEdge  time.Time
-	split     struct {
+	pruned    struct {
+		ver   uint64
+		n     int
+		first *sessionInfo
+	}
+	termPending map[string]bool // owners whose terminal is being prepared in the background
+	uiMu        sync.Mutex
+	uiTasks     []func() // work that finished off the UI goroutine and must change UI state
+	revealSel   bool     // the sidebar scrolls the selected row into view on the next layout
+	keyTag      bool
+	lastMods    key.Modifiers
+	skipEdits   bool // drop typed text until the next key press
+	hideSide    bool
+	sideHost    string // the machine whose sessions the sidebar lists; "" is this one
+	holdName    string // a session read by selecting it stays under Unread until another is selected
+	sideTag     bool   // sidebar edge drag
+	splitTag    bool   // terminal divider drag
+	dragging    int    // 0 none, 1 sidebar edge, 2 divider
+	lastEdge    time.Time
+	split       struct {
 		body  image.Rectangle // the main area's panes, in its own coordinates
 		right bool
 	}
@@ -232,6 +252,9 @@ func newGUIState() *guiApp {
 	g.mainView = newTermView(&g.th, g.fb)
 	g.termView = newTermView(&g.th, g.fb)
 	g.mainView.onPress = func() { g.setFocus(focusMain) }
+	g.mainView.onLink, g.termView.onLink = g.openTerminalLink, g.openTerminalLink
+	ctrlDown := func() bool { return g.lastMods&(key.ModCtrl|key.ModCommand) != 0 }
+	g.mainView.linkKey, g.termView.linkKey = ctrlDown, ctrlDown
 	g.termView.onPress = func() { g.setFocus(focusTerminal) }
 	return g
 }
@@ -242,7 +265,7 @@ func newGUIApp(remote SessionBackend) *guiApp {
 	g := newGUIState()
 	if remote != nil {
 		g.mb.SetRemote(remote)
-		g.remote = true
+		g.remote.Store(true)
 	}
 	setBackend(g.mb)
 	if src, ok := g.mb.local.(sessionDirectorySource); ok {
@@ -314,6 +337,17 @@ func (g *guiApp) applySessions(list []sessionInfo, err error) (changed bool) {
 	return changed
 }
 
+// refreshAsync is refreshSessions for the UI goroutine: the list is read in
+// the background, so a slow host does not freeze the window.
+func (g *guiApp) refreshAsync() {
+	go func() {
+		if g.refreshSessions() {
+			g.dirty.Store(true)
+			g.wake()
+		}
+	}()
+}
+
 // refreshSessions re-reads the session list and reports whether the window
 // needs a redraw because of it.
 func (g *guiApp) refreshSessions() (changed bool) {
@@ -329,7 +363,7 @@ func (g *guiApp) refreshSessions() (changed bool) {
 	g.mu.Lock()
 	selected, focused, mute := g.selected, g.windowFocused, g.mute
 	g.mu.Unlock()
-	if g.remote {
+	if g.remote.Load() {
 		// The agents run elsewhere; this machine must stay up to keep the link.
 		for _, s := range list {
 			if s.Host != "" && s.Activity == "active" {
@@ -365,7 +399,7 @@ func (g *guiApp) pollInterval() time.Duration {
 		d = 3 * time.Second
 	}
 	g.mu.Unlock()
-	if g.remote {
+	if g.remote.Load() {
 		d *= 2
 	}
 	return d
@@ -447,6 +481,7 @@ func (g *guiApp) shutdown() {
 	if g.main != nil {
 		g.main.close()
 	}
+	g.dropBesidePane()
 	for _, p := range g.terminals {
 		p.close()
 	}
@@ -473,9 +508,63 @@ func (g *guiApp) selectedInfo() (sessionInfo, bool) {
 	return sessionInfo{}, false
 }
 
+// updateTitle names the window after the session in front, with how many
+// sessions wait unread, so the taskbar says so while lam is in the background.
+func (g *guiApp) updateTitle() {
+	title := "lam"
+	if s, ok := g.selectedInfo(); ok && g.doc == nil {
+		title += " · " + s.Name
+	} else if g.doc != nil {
+		title += " · " + path.Base(g.doc.path)
+	}
+	unread := 0
+	for _, s := range g.allSessions() {
+		if s.Unread {
+			unread++
+		}
+	}
+	if unread > 0 {
+		title = fmt.Sprintf("(%d) %s", unread, title)
+	}
+	if title != g.title {
+		g.title = title
+		if g.win != nil {
+			g.win.Option(app.Title(title))
+		}
+	}
+}
+
 func (g *guiApp) say(format string, args ...any) {
-	g.message = fmt.Sprintf(format, args...)
+	g.sayAction("", nil, format, args...)
+}
+
+// toast is a message over the window: it goes by itself, or when clicked, and
+// may offer one action.
+type toast struct {
+	text   string
+	until  time.Time
+	action string
+	run    func()
+}
+
+const maxToasts = 4
+
+// sayAction shows a message with a button that runs act (none when label is empty).
+func (g *guiApp) sayAction(label string, act func(), format string, args ...any) {
+	text := fmt.Sprintf(format, args...)
+	g.message = text
 	g.msgUntil = time.Now().Add(6 * time.Second)
+	t := toast{text: text, until: g.msgUntil, action: label, run: act}
+	for i := range g.toasts {
+		if g.toasts[i].text == text { // the same thing again: keep one, refreshed
+			g.toasts[i] = t
+			return
+		}
+	}
+	g.toasts = append(g.toasts, t)
+	if len(g.toasts) > maxToasts {
+		g.toasts = g.toasts[len(g.toasts)-maxToasts:]
+	}
 }
 
 func (g *guiApp) selectSession(name string) {
@@ -490,6 +579,7 @@ func (g *guiApp) selectSession(name string) {
 		hold = g.holdName
 	}
 	g.selected = name
+	g.revealSel = true
 	for i := range g.sessions {
 		if g.sessions[i].Name == name && g.sessions[i].Unread {
 			g.sessions[i].Unread = false
@@ -561,7 +651,7 @@ func (g *guiApp) mainPane(cols, rows int) *embedded {
 		}
 		if g.emptyShell == nil && !g.emptyTried {
 			g.emptyTried = true
-			name := launcherSessionName("terminal", g.launchDir, nil)
+			name := launcherSessionName("terminal", nil)
 			p, err := startShellEmbedded(name, g.launchDir, cols, rows, g.dirty)
 			if err != nil {
 				g.say("Start shell: %v", err)
@@ -604,7 +694,8 @@ func (g *guiApp) mainPane(cols, rows int) *embedded {
 	p, err := startEmbedded(s.Name, cols, rows, g.dirty)
 	if err != nil {
 		g.attachFail[s.Name] = time.Now()
-		g.say("Attach %s: %v", s.Name, err)
+		name := s.Name
+		g.sayAction("Retry", func() { delete(g.attachFail, name) }, "Attach %s: %v", name, err)
 		return nil
 	}
 	delete(g.attachFail, s.Name)
@@ -615,9 +706,6 @@ func (g *guiApp) mainPane(cols, rows int) *embedded {
 	}
 	g.main = p
 	g.mainView.attach(p)
-	if g.win != nil {
-		g.win.Option(app.Title("lam · " + s.Name))
-	}
 	return p
 }
 
@@ -633,6 +721,9 @@ func (g *guiApp) closeMain() {
 // terminalPane is the selected session's own shell, started in the
 // session's current directory, or a terminal left running by an earlier run.
 func (g *guiApp) terminalPane(cols, rows int) *embedded {
+	if g.beside != "" {
+		return g.besidePaneFor(cols, rows)
+	}
 	s, ok := g.selectedInfo()
 	if !ok || !g.termVisible {
 		g.termView.attach(nil)
@@ -649,15 +740,44 @@ func (g *guiApp) terminalPane(cols, rows int) *embedded {
 		g.termView.attach(p)
 		return p
 	}
-	cwd := s.CWD
-	if live, err := sessionProcessWorkingDirectory(s.Name); err == nil && live != "" {
-		cwd = live
+	if g.termPending[owner] {
+		return nil // being prepared; the frame after it is ready draws it
 	}
+	if g.termPending == nil {
+		g.termPending = map[string]bool{}
+	}
+	g.termPending[owner] = true
+	// The folder and the list of leftover terminals come from the session's
+	// machine, which may be far away: ask off the UI goroutine.
+	go func() {
+		cwd := s.CWD
+		if live, err := sessionProcessWorkingDirectory(s.Name); err == nil && live != "" {
+			cwd = live
+		}
+		listed, err := backend().List()
+		g.onUI(func() {
+			delete(g.termPending, owner)
+			if cur, ok := g.selectedInfo(); !ok || cur.Name != owner || !g.termVisible || g.beside != "" {
+				return // the user moved on
+			}
+			if _, ok := g.terminals[owner]; ok {
+				return
+			}
+			g.startTerminal(s, cwd, listed, err == nil, cols, rows)
+		})
+	}()
+	return nil
+}
+
+// startTerminal opens the shell of a session's terminal: one left running by
+// an earlier run when there is one, else a new one in cwd.
+func (g *guiApp) startTerminal(s sessionInfo, cwd string, listed []sessionInfo, haveList bool, cols, rows int) {
+	owner := s.Name
 	if cwd == "" {
 		cwd = g.launchDir
 	}
 	label := terminalLabelFor(owner)
-	if listed, err := backend().List(); err == nil && !terminalLabelAmbiguous(listed, owner) {
+	if haveList && !terminalLabelAmbiguous(listed, owner) {
 		inUse := map[string]bool{}
 		for _, p := range g.terminals {
 			inUse[p.name] = true
@@ -671,7 +791,7 @@ func (g *guiApp) terminalPane(cols, rows int) *embedded {
 				p.setWorkingDirectory(cand.CWD)
 				g.terminals[owner] = p
 				g.termView.attach(p)
-				return p
+				return
 			}
 		}
 	}
@@ -680,11 +800,10 @@ func (g *guiApp) terminalPane(cols, rows int) *embedded {
 	if err != nil {
 		g.say("Start terminal: %v", err)
 		g.termVisible = false
-		return nil
+		return
 	}
 	g.terminals[owner] = p
 	g.termView.attach(p)
-	return p
 }
 
 // disposeTerminal closes an owner's terminal and ends its shell: closing the
@@ -708,7 +827,77 @@ func (g *guiApp) disposeTerminal(owner string) {
 	}()
 }
 
+// openBeside shows another session next to the one in front, in the pane the
+// terminal uses.
+func (g *guiApp) openBeside(name string) {
+	if name == "" {
+		return
+	}
+	if g.beside != name {
+		g.dropBesidePane()
+	}
+	g.beside, g.termVisible, g.focus = name, true, focusTerminal
+}
+
+// closeBeside puts the second session away; it keeps running.
+func (g *guiApp) closeBeside() {
+	g.dropBesidePane()
+	g.beside = ""
+	g.termVisible = false
+	g.focus = focusMain
+}
+
+func (g *guiApp) dropBesidePane() {
+	if p := g.besidePane; p != nil {
+		if g.termView.pane == p {
+			g.termView.attach(nil)
+		}
+		p.close()
+		g.besidePane = nil
+	}
+}
+
+// besidePaneFor is the attached second session, started when it is first
+// shown; the pane is put away when that session ends.
+func (g *guiApp) besidePaneFor(cols, rows int) *embedded {
+	var s sessionInfo
+	found := false
+	for _, o := range g.allSessions() {
+		if o.Name == g.beside {
+			s, found = o, true
+		}
+	}
+	if !found {
+		g.closeBeside()
+		return nil
+	}
+	if p := g.besidePane; p != nil && p.name == s.Name && p.identity == sessionIdentity(s) {
+		if !p.done.Load() || time.Since(p.started) < paneRestartHold {
+			g.termView.attach(p)
+			return p
+		}
+	}
+	if t, failed := g.attachFail[s.Name]; failed && time.Since(t) < 2*time.Second {
+		return nil
+	}
+	g.dropBesidePane()
+	p, err := startEmbedded(s.Name, cols, rows, g.dirty)
+	if err != nil {
+		g.attachFail[s.Name] = time.Now()
+		g.say("Attach %s: %v", s.Name, err)
+		return nil
+	}
+	p.identity = sessionIdentity(s)
+	g.besidePane = p
+	g.termView.attach(p)
+	return p
+}
+
 func (g *guiApp) toggleTerminal() {
+	if g.beside != "" {
+		g.closeBeside()
+		return
+	}
 	if g.termVisible {
 		if s, ok := g.selectedInfo(); ok {
 			g.disposeTerminal(s.Name)
@@ -754,7 +943,27 @@ func (g *guiApp) focusedView() *termView {
 	return g.mainView
 }
 
+// onUI queues f to run on the UI goroutine at the start of the next frame.
+func (g *guiApp) onUI(f func()) {
+	g.uiMu.Lock()
+	g.uiTasks = append(g.uiTasks, f)
+	g.uiMu.Unlock()
+	g.dirty.Store(true)
+	g.wake()
+}
+
+func (g *guiApp) runUITasks() {
+	g.uiMu.Lock()
+	tasks := g.uiTasks
+	g.uiTasks = nil
+	g.uiMu.Unlock()
+	for _, f := range tasks {
+		f()
+	}
+}
+
 func (g *guiApp) layout(gtx layout.Context) layout.Dimensions {
+	g.runUITasks()
 	g.flushProgramCopies(gtx)
 	g.pollConnect()
 	if g.autoConnect != "" && g.dlg.kind == dlgNone {
@@ -765,6 +974,7 @@ func (g *guiApp) layout(gtx layout.Context) layout.Dimensions {
 		g.startConnect(host)
 	}
 	g.pruneGone()
+	g.updateTitle()
 	// Cleared before the terminals are read: output that arrives while this
 	// frame is drawn sets it again and wakes the next one.
 	g.dirty.Store(false)
@@ -797,19 +1007,42 @@ func (g *guiApp) layout(gtx layout.Context) layout.Dimensions {
 
 	paint.Fill(gtx.Ops, g.th.Bg)
 	g.handleKeys(gtx)
-	sideW := 0
-	if !g.hideSide {
-		sideW = g.sidebarWidth(gtx, size.X)
+	// The sidebar slides away and back instead of jumping.
+	target := float32(1)
+	if g.hideSide {
+		target = 0
+	}
+	now := time.Now()
+	if !g.sideInit {
+		g.sideInit, g.sideAnim = true, target
+	} else if g.sideAnim != target {
+		step := float32(min(now.Sub(g.sideAt), 50*time.Millisecond)) / float32(150*time.Millisecond)
+		if g.sideAnim < target {
+			g.sideAnim = min(g.sideAnim+step, target)
+		} else {
+			g.sideAnim = max(g.sideAnim-step, target)
+		}
+		gtx.Execute(op.InvalidateCmd{})
+	}
+	g.sideAt = now
+	full, sideW := 0, 0
+	if g.sideAnim > 0 {
+		full = g.sidebarWidth(gtx, size.X)
+		sideW = int(float32(full) * g.sideAnim)
 		func() {
+			defer clip.Rect{Max: image.Pt(sideW, size.Y)}.Push(gtx.Ops).Pop()
+			defer op.Offset(image.Pt(sideW-full, 0)).Push(gtx.Ops).Pop()
 			sg := gtx
-			sg.Constraints = layout.Exact(image.Pt(sideW, size.Y))
+			sg.Constraints = layout.Exact(image.Pt(full, size.Y))
 			g.layoutSidebar(sg)
 		}()
 		paint.FillShape(gtx.Ops, g.th.Divider, clip.Rect{Min: image.Pt(sideW, 0), Max: image.Pt(sideW+max(1, gtx.Dp(1)), size.Y)}.Op())
-		g.edgeHandle(gtx, image.Rect(sideW-gtx.Dp(3), 0, sideW+gtx.Dp(4), size.Y), &g.sideTag, pointer.CursorColResize)
+		if g.sideAnim == 1 {
+			g.edgeHandle(gtx, image.Rect(sideW-gtx.Dp(3), 0, sideW+gtx.Dp(4), size.Y), &g.sideTag, pointer.CursorColResize)
+		}
 	}
 	x := 0
-	if !g.hideSide {
+	if g.sideAnim > 0 {
 		x = sideW + max(1, gtx.Dp(1))
 	}
 	func() {
@@ -824,8 +1057,21 @@ func (g *guiApp) layout(gtx layout.Context) layout.Dimensions {
 	if g.menu != nil {
 		g.layoutMenu(gtx)
 	}
+	g.layoutToasts(gtx, size)
 	if g.dlg.kind != dlgNone {
+		// A dialog fades in rather than cutting in.
+		now := time.Now()
+		if g.dlg.opened.IsZero() {
+			g.dlg.opened = now
+		}
+		const fade = 110 * time.Millisecond
+		t := min(float32(now.Sub(g.dlg.opened))/float32(fade), 1)
+		stack := paint.PushOpacity(gtx.Ops, 0.15+0.85*t)
 		g.layoutDialog(gtx)
+		stack.Pop()
+		if t < 1 {
+			gtx.Execute(op.InvalidateCmd{})
+		}
 	}
 	g.handleDrags(gtx)
 	// Watch presses without taking them from what is under the pointer.
@@ -960,10 +1206,12 @@ func (g *guiApp) layoutMain(gtx layout.Context) {
 			}
 			if g.listErr != "" {
 				msg = g.listErr
-			} else if g.message != "" && time.Now().Before(g.msgUntil) {
-				msg = g.message
 			}
-			g.drawText(gtx, image.Pt(mr.Min.X+pad, mr.Min.Y+pad), g.th.UISize, font.Normal, g.th.TextDim, msg, mr.Dx()-2*pad)
+			if g.listErr == "" && g.listed && len(g.allSessions()) == 0 {
+				g.layoutEmptyMain(gtx, mr)
+			} else {
+				g.drawText(gtx, image.Pt(mr.Min.X+pad, mr.Min.Y+pad), g.th.UISize, font.Normal, g.th.TextDim, msg, mr.Dx()-2*pad)
+			}
 		}
 	}
 	if g.termVisible {
@@ -975,7 +1223,9 @@ func (g *guiApp) layoutMain(gtx layout.Context) {
 		g.edgeHandle(gtx, divR.Inset(-gtx.Dp(3)), &g.splitTag, cursor)
 		strip := gtx.Dp(24)
 		label := "Terminal"
-		if p := g.terminals[g.selected]; p != nil {
+		if g.beside != "" {
+			label = g.beside
+		} else if p := g.terminals[g.selected]; p != nil {
 			if cwd := p.workingDirectory(); cwd != "" {
 				label += " · " + shortenHomePath(cwd, g.sourceFor(hostOfName(g.selected)))
 			}
@@ -985,9 +1235,13 @@ func (g *guiApp) layoutMain(gtx layout.Context) {
 			col = g.th.TextDim
 		}
 		g.drawTextMid(gtx, image.Pt(termR.Min.X+pad, termR.Min.Y+strip/2+gtx.Dp(3)), g.th.SmallSize, font.Medium, col, label, termR.Dx()-2*pad-gtx.Dp(30))
+		closeTip := "Close terminal"
+		if g.beside != "" {
+			closeTip = "Close this pane"
+		}
 		cb := gtx.Dp(24)
 		ccy := termR.Min.Y + strip/2 + gtx.Dp(3)
-		if g.ghostButton(gtx, "term-close", image.Rect(termR.Max.X-pad/2-cb, ccy-cb/2, termR.Max.X-pad/2, ccy-cb/2+cb), "Close terminal", false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+		if g.ghostButton(gtx, "term-close", image.Rect(termR.Max.X-pad/2-cb, ccy-cb/2, termR.Max.X-pad/2, ccy-cb/2+cb), closeTip, false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 			iconCross(gtx, c, float32(gtx.Dp(3.5)), float32(max(1, gtx.Dp(1.3))), col)
 		}) {
 			g.toggleTerminal()
@@ -1005,9 +1259,6 @@ func (g *guiApp) layoutMain(gtx layout.Context) {
 	} else {
 		g.termView.attach(nil)
 	}
-	if g.message != "" && time.Now().Before(g.msgUntil) && g.mainView.pane != nil {
-		g.layoutToast(gtx, size)
-	}
 }
 
 func (g *guiApp) drawView(gtx layout.Context, v *termView, r image.Rectangle, focused bool) {
@@ -1020,16 +1271,80 @@ func (g *guiApp) drawView(gtx layout.Context, v *termView, r image.Rectangle, fo
 	v.Layout(vg, focused && windowFocused && g.dlg.kind == dlgNone)
 }
 
-func (g *guiApp) layoutToast(gtx layout.Context, size image.Point) {
-	gtx.Execute(op.InvalidateCmd{At: g.msgUntil})
-	gl, w, _ := g.shape(gtx, g.th.SmallSize, font.Normal, g.message, size.X*2/3)
-	padX, h := gtx.Dp(14), gtx.Dp(32)
-	r := image.Rect(size.X/2-w/2-padX, size.Y-h-gtx.Dp(18), size.X/2+w/2+padX, size.Y-gtx.Dp(18))
-	paint.FillShape(gtx.Ops, g.th.Surface, clip.UniformRRect(r, h/2).Op(gtx.Ops))
-	if len(gl) > 0 {
-		asc, desc := gl[0].Ascent.Ceil(), gl[0].Descent.Ceil()
-		g.paintGlyphs(gtx, gl, image.Pt(r.Min.X+padX, r.Min.Y+h/2+(asc-desc)/2), g.th.Text)
+// layoutToasts stacks the messages up from the bottom centre of the window.
+func (g *guiApp) layoutToasts(gtx layout.Context, size image.Point) {
+	now := time.Now()
+	g.toasts = slices.DeleteFunc(g.toasts, func(t toast) bool { return !now.Before(t.until) })
+	if len(g.toasts) == 0 {
+		return
 	}
+	next := g.toasts[0].until
+	padX, h, gap := gtx.Dp(14), gtx.Dp(34), gtx.Dp(8)
+	y := size.Y - gtx.Dp(18)
+	var dismiss, act = -1, -1
+	for i := len(g.toasts) - 1; i >= 0; i-- {
+		t := g.toasts[i]
+		next = minTime(next, t.until)
+		gl, w, _ := g.shape(gtx, g.th.SmallSize, font.Normal, t.text, size.X*2/3)
+		aw := 0
+		if t.action != "" {
+			_, aw, _ = g.shape(gtx, g.th.SmallSize, font.Medium, t.action, 1<<20)
+			aw += gtx.Dp(40)
+		}
+		r := image.Rect(size.X/2-(w+aw)/2-padX, y-h, size.X/2+(w+aw)/2+padX, y)
+		y -= h + gap
+		rr := clip.UniformRRect(r, h/2)
+		for k := 3; k >= 1; k-- { // a soft shadow
+			sh := color.NRGBA{A: uint8(float32(10+5*(3-k)) * g.th.Shadow)}
+			paint.FillShape(gtx.Ops, sh, clip.UniformRRect(r.Inset(-gtx.Dp(unit.Dp(k))).Add(image.Pt(0, gtx.Dp(unit.Dp(k)))), h/2+gtx.Dp(unit.Dp(k))).Op(gtx.Ops))
+		}
+		paint.FillShape(gtx.Ops, g.th.Surface, rr.Op(gtx.Ops))
+		paint.FillShape(gtx.Ops, g.th.Border, clip.Stroke{Path: rr.Path(gtx.Ops), Width: float32(max(1, gtx.Dp(1)))}.Op())
+		id := fmt.Sprintf("toast-%d", i)
+		c := g.clickable(id)
+		if c.Clicked(gtx) {
+			dismiss = i
+		}
+		func() {
+			st := op.Offset(r.Min).Push(gtx.Ops)
+			defer st.Pop()
+			cg := gtx
+			cg.Constraints = layout.Exact(r.Size())
+			c.Layout(cg, func(gtx layout.Context) layout.Dimensions {
+				pointer.CursorPointer.Add(gtx.Ops)
+				return layout.Dimensions{Size: r.Size()}
+			})
+		}()
+		if len(gl) > 0 {
+			asc, desc := gl[0].Ascent.Ceil(), gl[0].Descent.Ceil()
+			g.paintGlyphs(gtx, gl, image.Pt(r.Min.X+padX, r.Min.Y+h/2+(asc-desc)/2), g.th.Text)
+		}
+		if t.action != "" {
+			bid := "toast-act-" + fmt.Sprint(i)
+			g.buttonStyled(gtx, bid, t.action, image.Pt(r.Max.X-gtx.Dp(8), r.Min.Y+h/2), true, false, false)
+			if g.clicked(gtx, bid) {
+				act = i
+			}
+		}
+	}
+	gtx.Execute(op.InvalidateCmd{At: next})
+	switch {
+	case act >= 0:
+		run := g.toasts[act].run
+		g.toasts = slices.Delete(g.toasts, act, act+1)
+		if run != nil {
+			run()
+		}
+	case dismiss >= 0:
+		g.toasts = slices.Delete(g.toasts, dismiss, dismiss+1)
+	}
+}
+
+func minTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }
 
 // guiOwnTitleBar is whether lam draws the window's title bar itself. GNOME
@@ -1044,6 +1359,17 @@ func (g *guiApp) layoutHeader(gtx layout.Context, width, h int) {
 	cy := h / 2
 	moveArea(gtx, image.Rect(0, 0, width, h))
 	paint.FillShape(gtx.Ops, g.th.Divider, clip.Rect{Min: image.Pt(0, h-max(1, gtx.Dp(1))), Max: image.Pt(width, h)}.Op())
+	if g.hideSide {
+		// With the sidebar away, the button that brings it back is at the left.
+		b := gtx.Dp(30)
+		r := image.Rect(gtx.Dp(8), cy-b/2, gtx.Dp(8)+b, cy+b/2)
+		if g.ghostButton(gtx, "side-show", r, "Show sidebar  "+g.sideToggleKey(), false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+			iconSidebar(gtx, c, float32(gtx.Dp(8)), col)
+		}) {
+			g.hideSide = false
+		}
+		pad = r.Max.X + gtx.Dp(8)
+	}
 
 	x := width - gtx.Dp(8)
 	b := gtx.Dp(30)
@@ -1079,10 +1405,24 @@ func (g *guiApp) layoutHeader(gtx layout.Context, width, h int) {
 		x -= gtx.Dp(8)
 	}
 
+	mod := "Ctrl+Shift+"
+	if guiMac {
+		mod = "⌘"
+	}
+	ir := float32(gtx.Dp(8))
+	if btn("open-doc", "Open a document  "+mod+"D", color.NRGBA{}, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+		iconDocument(gtx, c, ir, col)
+	}) {
+		g.openDocumentDialog()
+	}
+
 	if g.doc != nil {
 		// A document is in front: its tab, with Reload at the right.
 		xr := x - gtx.Dp(8)
-		if !g.doc.loading {
+		g.mu.Lock()
+		docLoading := g.doc.loading
+		g.mu.Unlock()
+		if !docLoading {
 			xr -= g.button(gtx, "doc-reload", "Reload", image.Pt(xr, cy), true, false) + gtx.Dp(8)
 			if g.clicked(gtx, "doc-reload") {
 				g.loadDocument(g.doc)
@@ -1102,15 +1442,10 @@ func (g *guiApp) layoutHeader(gtx layout.Context, width, h int) {
 		}
 		return
 	}
-	mod := "Ctrl+Shift+"
-	if guiMac {
-		mod = "⌘"
-	}
 	termTip := "Open terminal  " + mod + "T"
 	if g.termVisible {
 		termTip = "Close terminal  " + mod + "T"
 	}
-	ir := float32(gtx.Dp(8))
 	if btn("stop", "Stop session  "+mod+"W", color.NRGBA{}, func(gtx layout.Context, c image.Point, col color.NRGBA) {
 		iconStop(gtx, c, ir, col)
 	}) {
@@ -1232,6 +1567,9 @@ func (g *guiApp) buttonStyled(gtx layout.Context, id, label string, pt image.Poi
 func (g *guiApp) clickable(id string) *widget.Clickable {
 	c := g.buttons[id]
 	if c == nil {
+		if len(g.buttons) > 2048 { // ids of closed tabs and gone rows pile up; clickables hold no state worth keeping
+			clear(g.buttons)
+		}
 		c = new(widget.Clickable)
 		g.buttons[id] = c
 	}
@@ -1277,7 +1615,7 @@ func (g *guiApp) handleKeys(gtx layout.Context) {
 			case g.dlg.kind != dlgNone:
 				g.dialogText(text)
 			case g.focus == focusFilter:
-				g.filter += text
+				g.filterInsert(text)
 			}
 		case key.Event:
 			g.lastMods = ev.Modifiers
@@ -1295,6 +1633,7 @@ func (g *guiApp) handleKeys(gtx layout.Context) {
 				g.dialogKey(gtx, ev)
 			case g.menu != nil && ev.Name == key.NameEscape:
 				g.menu = nil
+			case g.focus != focusFilter && g.doc != nil && ev.Name == "C" && ev.Modifiers&(key.ModCtrl|key.ModCommand) != 0 && g.copyDocSelection(gtx):
 			case g.focus != focusFilter && g.docKey(ev):
 				gtx.Execute(op.InvalidateCmd{})
 			case g.shortcut(gtx, ev):
@@ -1324,7 +1663,7 @@ func (g *guiApp) handleKeys(gtx layout.Context) {
 			case g.dlg.kind != dlgNone:
 				g.dialogText(ev.Text)
 			case g.focus == focusFilter:
-				g.filter += ev.Text
+				g.filterInsert(ev.Text)
 			case g.doc != nil:
 			default:
 				if v := g.focusedView(); v != nil {
@@ -1428,6 +1767,8 @@ func (g *guiApp) shortcut(gtx layout.Context, ev key.Event) bool {
 		g.openQuitAll()
 	case cs && ev.Name == ",":
 		g.dlg = dialog{kind: dlgSettings}
+	case cs && ev.Name == "K":
+		g.openPalette()
 	case cs && ev.Name == "B", ev.Name == key.NameF2 && m == 0:
 		g.hideSide = !g.hideSide
 	case cs && ev.Name == "/", ev.Name == key.NameF1 && m == 0:
@@ -1466,15 +1807,23 @@ func (g *guiApp) filterKey(ev key.Event) {
 			g.selectSession(list[0].Name)
 		}
 		g.focus = focusMain
-	case key.NameDeleteBackward:
-		if r := []rune(g.filter); len(r) > 0 {
-			g.filter = string(r[:len(r)-1])
-		}
 	case key.NameDownArrow:
 		g.stepSession(1)
 	case key.NameUpArrow:
 		g.stepSession(-1)
+	default:
+		g.filterEd.sync(g.filter)
+		if g.filterEd.key(ev) {
+			g.filter = g.filterEd.String()
+		}
 	}
+}
+
+// filterInsert types text into the search field at its caret.
+func (g *guiApp) filterInsert(text string) {
+	g.filterEd.sync(g.filter)
+	g.filterEd.insert(text)
+	g.filter = g.filterEd.String()
 }
 
 // guiRow is one line of the session list: a project heading or a session.
@@ -1659,6 +2008,10 @@ func (g *guiApp) shape(gtx layout.Context, size unit.Sp, weight font.Weight, s s
 	if l, ok := g.shapes[key]; ok {
 		return l.gl, l.width, l.asc
 	}
+	if l, ok := g.shapesOld[key]; ok { // used since the last turnover: keep it
+		g.shapes[key] = l
+		return l.gl, l.width, l.asc
+	}
 	g.shaper.LayoutString(p, s)
 	var gl []text.Glyph
 	width, asc := 0, 0
@@ -1667,8 +2020,8 @@ func (g *guiApp) shape(gtx layout.Context, size unit.Sp, weight font.Weight, s s
 		width = max(width, (gg.X + gg.Advance).Ceil())
 		asc = gg.Ascent.Ceil()
 	}
-	if g.shapes == nil || len(g.shapes) >= 4096 {
-		g.shapes = map[shapeKey]shapedLine{}
+	if g.shapes == nil || len(g.shapes) >= 2048 { // two generations: what is in use survives a turnover
+		g.shapesOld, g.shapes = g.shapes, map[shapeKey]shapedLine{}
 	}
 	g.shapes[key] = shapedLine{gl, width, asc}
 	return gl, width, asc
@@ -1755,6 +2108,15 @@ func (g *guiApp) pruneGone() {
 	g.mu.Unlock()
 	if !ok {
 		return
+	}
+	var first *sessionInfo
+	if len(list) > 0 {
+		first = &list[0]
+	}
+	if ver := g.rowsVer.Load(); g.pruned.ver == ver && g.pruned.n == len(list) && g.pruned.first == first {
+		return // the list is the one already pruned against
+	} else {
+		g.pruned.ver, g.pruned.n, g.pruned.first = ver, len(list), first
 	}
 	live := make(map[string]bool, len(list))
 	cwds := make(map[string]bool, len(list))

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const remoteProtocolVersion = 3
@@ -725,7 +726,28 @@ func (b *remoteSessionBackend) Close() {
 
 func (b *remoteSessionBackend) List() ([]sessionInfo, error) {
 	response, err := b.cur().call(remoteRequest{Op: "list"})
-	return response.Sessions, err
+	return cleanRemoteSessions(response.Sessions), err
+}
+
+// cleanRemoteSessions drops sessions whose name carries control characters and
+// strips them from the rest of what a host reports, as it is drawn as text in a
+// terminal: an escape sequence in a name or a folder must not reach it.
+func cleanRemoteSessions(list []sessionInfo) []sessionInfo {
+	isCtl := func(r rune) bool { return unicode.IsControl(r) }
+	out := list[:0]
+	for _, s := range list {
+		if strings.IndexFunc(s.Name, isCtl) >= 0 {
+			continue
+		}
+		s.CWD = strings.Map(func(r rune) rune {
+			if isCtl(r) {
+				return -1
+			}
+			return r
+		}, s.CWD)
+		out = append(out, s)
+	}
+	return out
 }
 
 func (b *remoteSessionBackend) Create(name, cwd, command string) error {
@@ -770,7 +792,7 @@ func (b *remoteSessionBackend) callWithTimeout(request remoteRequest, timeout ti
 	}
 	completed := make(chan result, 1)
 	go func() {
-		response, err := b.cur().call(request)
+		response, err := b.cur().callFor(request, timeout+time.Second)
 		completed <- result{response: response, err: err}
 	}()
 	timer := time.NewTimer(timeout)

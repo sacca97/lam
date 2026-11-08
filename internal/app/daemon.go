@@ -80,7 +80,7 @@ func checkUnread(prevStates map[string]sessionState) {
 
 		// Working → idle: mark unread (always, even if someone is attached)
 		if wasWorking && nowIdle {
-			os.WriteFile(fmt.Sprintf("/tmp/claude-unread-%s", s.Name), []byte{}, 0644)
+			writeUnreadMarker(s.Name)
 		}
 
 		// Idle → working: someone responded, clear unread
@@ -307,4 +307,13 @@ func uninstallLaunchd() error {
 	}
 	fmt.Println("  Service stopped and removed.")
 	return nil
+}
+
+// writeUnreadMarker creates the unread marker without following a link someone
+// left at that path in /tmp.
+func writeUnreadMarker(name string) {
+	f, err := os.OpenFile(fmt.Sprintf("/tmp/claude-unread-%s", name), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
+	if err == nil {
+		f.Close()
+	}
 }

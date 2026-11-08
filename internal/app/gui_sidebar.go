@@ -171,6 +171,19 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 			g.layoutEmptyList(lg, listErr, pad)
 			return
 		}
+		if g.revealSel {
+			g.revealSel = false
+			g.mu.Lock()
+			sel := g.selected
+			g.mu.Unlock()
+			if i := slices.IndexFunc(rows, func(r guiRow) bool { return !r.header && !r.stateHead && r.s.Name == sel }); i >= 0 {
+				if p := g.list.Position; i < p.First {
+					g.list.ScrollTo(i)
+				} else if i >= p.First+p.Count-1 && p.Count > 1 {
+					g.list.ScrollTo(i - p.Count + 2)
+				}
+			}
+		}
 		animate := false
 		g.nextAge = time.Time{}
 		g.list.Layout(lg, len(rows), func(gtx layout.Context, i int) layout.Dimensions {
@@ -205,6 +218,12 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	}) {
 		g.dlg = dialog{kind: dlgHelp}
 	}
+	tr := sr.Sub(image.Pt(b+gtx.Dp(2), 0))
+	if g.ghostButton(gtx, "side-toggle", tr, "Hide sidebar  "+g.sideToggleKey(), false, func(gtx layout.Context, c image.Point, col color.NRGBA) {
+		iconSidebar(gtx, c, float32(gtx.Dp(8)), col)
+	}) {
+		g.hideSide = true
+	}
 	active, idle := 0, 0
 	for _, s := range g.allSessions() {
 		switch {
@@ -223,12 +242,20 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	g.drawTextMid(gtx, image.Pt(x, fcy), g.th.TinySize, font.Normal, g.th.TextFaint, fmt.Sprintf("  ·  %d idle", idle), 1<<20)
 	// A newer release: a quiet button before the icons.
 	if tag, ok := g.upd.available(); ok {
-		chip := image.Pt(sr.Min.X-gtx.Dp(8), fcy)
+		chip := image.Pt(tr.Min.X-gtx.Dp(8), fcy)
 		g.buttonStyled(gtx, "update-chip", "↑ "+tag, chip, true, false, false)
 		if g.clicked(gtx, "update-chip") {
 			g.openUpdate()
 		}
 	}
+}
+
+// sideToggleKey is the shortcut that shows or hides the sidebar, for tooltips.
+func (g *guiApp) sideToggleKey() string {
+	if guiMac {
+		return "⌘B"
+	}
+	return "Ctrl+Shift+B"
 }
 
 // sideTab is one machine in the tab strip.
@@ -533,7 +560,7 @@ func (g *guiApp) layoutEmptyList(gtx layout.Context, listErr string, pad int) {
 		y += gtx.Dp(40)
 	}
 	label := "Connect to a host"
-	if g.remote {
+	if g.remote.Load() {
 		label = "Change host"
 	}
 	g.buttonStyled(gtx, "empty-connect", label, image.Pt(x, y), false, false, false)
@@ -570,17 +597,9 @@ func (g *guiApp) layoutSearch(gtx layout.Context, r image.Rectangle) {
 	h := r.Dy()
 	iconSearch(gtx, image.Pt(gtx.Dp(16), h/2), float32(gtx.Dp(4.5)), g.th.TextFaint)
 	tx := gtx.Dp(30)
-	text, col := g.filter, g.th.Text
-	if text == "" {
-		text, col = "Search", g.th.TextFaint
-	}
-	w := g.drawTextMid(gtx, image.Pt(tx, h/2), g.th.TinySize, font.Normal, col, text, r.Dx()-tx-gtx.Dp(28))
-	if focused {
-		x := tx + 1
-		if g.filter != "" {
-			x += w
-		}
-		paint.FillShape(gtx.Ops, g.th.Accent, clip.Rect{Min: image.Pt(x, gtx.Dp(9)), Max: image.Pt(x+max(1, gtx.Dp(1.5)), h-gtx.Dp(9))}.Op())
+	g.filterEd.sync(g.filter)
+	if g.fieldText(gtx, &g.filterEd, image.Rect(tx, 0, r.Dx()-gtx.Dp(28), h), h/2, g.th.TinySize, g.th.Text, "Search", focused) {
+		g.focus = focusFilter
 	}
 	if g.filter != "" {
 		cr := image.Rect(r.Dx()-gtx.Dp(28), gtx.Dp(3), r.Dx()-gtx.Dp(3), h-gtx.Dp(3))
@@ -721,6 +740,10 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 			paint.FillShape(gtx.Ops, g.th.Selected, rr.Op(gtx.Ops))
 		case hovered || menuOpen:
 			paint.FillShape(gtx.Ops, g.th.Hover, rr.Op(gtx.Ops))
+		case s.Unread: // waiting for you: a faint wash of the unread colour
+			wash := g.th.Unread
+			wash.A = 22
+			paint.FillShape(gtx.Ops, wash, rr.Op(gtx.Ops))
 		}
 		pointer.CursorPointer.Add(gtx.Ops)
 		return layout.Dimensions{Size: image.Pt(w, itemH)}
@@ -766,11 +789,12 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 	nameW := g.drawTextMid(gtx, image.Pt(x, cy), g.th.UISize, weight, nameCol, label, right-x)
 	// Under a state heading the folder tells the sessions apart; under a folder
 	// heading it is the program.
-	note := sessionProject(s)
-	if byFolder {
-		note = providerName(s)
+	rest := right - x - nameW - gtx.Dp(8)
+	note := providerName(s)
+	if !byFolder {
+		note = g.fitPath(gtx, s.CWD, s.Host, rest)
 	}
-	if rest := right - x - nameW - gtx.Dp(8); rest > gtx.Dp(28) {
+	if rest > gtx.Dp(28) {
 		g.drawTextMid(gtx, image.Pt(x+nameW+gtx.Dp(8), cy), g.th.TinySize, font.Normal, g.th.TextFaint, note, rest)
 	}
 
@@ -779,6 +803,13 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 	event.Op(gtx.Ops, tag)
 	area.Pop()
 	pt.Pop()
+	if hovered && !menuOpen {
+		// What the row cannot show on one line: its program, state and folder.
+		state := stateNames[sidebarState(s)]
+		head := providerName(s) + " · " + state + " · "
+		_, hw, _ := g.shape(gtx, g.th.TinySize, font.Medium, head, 1<<20)
+		g.tooltip(gtx, image.Rect(inner.Min.X, inner.Min.Y, inner.Max.X, inner.Max.Y), head+g.fitPath(gtx, s.CWD, s.Host, w-hw-gtx.Dp(40)))
+	}
 	return dims
 }
 
@@ -875,7 +906,11 @@ func (g *guiApp) layoutGroupHeader(gtx layout.Context, r guiRow, pad int) layout
 	x := pad + gtx.Dp(4)
 	chevron(gtx, image.Pt(x+gtx.Dp(4), cy), float32(gtx.Dp(3.2)), r.folded, col)
 	x += gtx.Dp(14)
-	g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.SemiBold, col, r.label, right-x-gtx.Dp(6))
+	label := r.label
+	if r.cwd != "" {
+		label = g.fitPath(gtx, r.cwd, r.host, right-x-gtx.Dp(6))
+	}
+	g.drawTextMid(gtx, image.Pt(x, cy), g.th.TinySize, font.SemiBold, col, label, right-x-gtx.Dp(6))
 	return dims
 }
 
@@ -999,6 +1034,40 @@ func iconPencil(gtx layout.Context, c image.Point, r float32, col color.NRGBA) {
 	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: w}.Op())
 }
 
+// iconDocument is a page with a folded corner and two lines of text.
+func iconDocument(gtx layout.Context, c image.Point, r float32, col color.NRGBA) {
+	x, y := float32(c.X), float32(c.Y)
+	w := float32(math.Max(1.3, float64(r)/6))
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(x-r*0.6, y-r*0.9))
+	p.LineTo(f32.Pt(x+r*0.15, y-r*0.9))
+	p.LineTo(f32.Pt(x+r*0.6, y-r*0.45))
+	p.LineTo(f32.Pt(x+r*0.6, y+r*0.9))
+	p.LineTo(f32.Pt(x-r*0.6, y+r*0.9))
+	p.Close()
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: w}.Op())
+	for _, dy := range []float32{0.1, 0.5} {
+		var l clip.Path
+		l.Begin(gtx.Ops)
+		l.MoveTo(f32.Pt(x-r*0.3, y+r*dy))
+		l.LineTo(f32.Pt(x+r*0.3, y+r*dy))
+		paint.FillShape(gtx.Ops, col, clip.Stroke{Path: l.End(), Width: w}.Op())
+	}
+}
+
+// iconSidebar is a window with its left strip marked off.
+func iconSidebar(gtx layout.Context, c image.Point, r float32, col color.NRGBA) {
+	x, y := float32(c.X), float32(c.Y)
+	w := float32(math.Max(1.3, float64(r)/6))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: clip.UniformRRect(image.Rect(c.X-int(r), c.Y-int(r*0.8), c.X+int(r), c.Y+int(r*0.8)), int(r*0.25)).Path(gtx.Ops), Width: w}.Op())
+	var l clip.Path
+	l.Begin(gtx.Ops)
+	l.MoveTo(f32.Pt(x-r*0.3, y-r*0.8))
+	l.LineTo(f32.Pt(x-r*0.3, y+r*0.8))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: l.End(), Width: w}.Op())
+}
+
 // iconStop is the media stop symbol: a square in a circle, so it does not
 // read as the window's maximize button.
 func iconStop(gtx layout.Context, c image.Point, r float32, col color.NRGBA) {
@@ -1032,4 +1101,26 @@ func iconMaximize(gtx layout.Context, c image.Point, r float32, maximized bool, 
 		return
 	}
 	box(x, y, r*0.85)
+}
+
+// fitPath is a folder as it is on its machine, from the home folder when it
+// is under it (~/Projects/lam). When that is wider than room it loses its
+// leading parts (…/Projects/lam), keeping the end of the path: the last
+// part alone if even the last two do not fit.
+func (g *guiApp) fitPath(gtx layout.Context, dir, host string, room int) string {
+	if dir == "" {
+		return ""
+	}
+	full := shortenHomePath(dir, g.sourceFor(host))
+	parts := strings.Split(full, "/")
+	for drop := 0; ; drop++ {
+		text := full
+		if drop > 0 {
+			text = "…/" + strings.Join(parts[drop:], "/")
+		}
+		_, w, _ := g.shape(gtx, g.th.TinySize, font.Normal, text, 1<<20)
+		if w <= room || len(parts)-drop <= 1 {
+			return text
+		}
+	}
 }

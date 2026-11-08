@@ -113,10 +113,16 @@ func newMuxWriter(w io.Writer) *muxWriter {
 }
 
 func (m *muxWriter) send(channel uint32, kind byte, payload []byte) error {
-	frame := encodeMuxFrame(channel, kind, payload)
+	var hdr [muxHeaderSize]byte // header and payload go to the compressor apart: no copy of the payload
+	binary.BigEndian.PutUint32(hdr[0:4], channel)
+	hdr[4] = kind
+	binary.BigEndian.PutUint32(hdr[5:9], uint32(len(payload)))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, err := m.fw.Write(frame); err != nil {
+	if _, err := m.fw.Write(hdr[:]); err != nil {
+		return err
+	}
+	if _, err := m.fw.Write(payload); err != nil {
 		return err
 	}
 	if err := m.fw.Flush(); err != nil {
@@ -264,14 +270,18 @@ func serveMux(w io.Writer, r io.Reader, dial func(string, time.Duration) (net.Co
 			if st != nil {
 				// A session that is not taking input must not stop the whole
 				// connection from being read: give it a while, then end it.
-				timer := time.NewTimer(muxInputStall)
 				select {
-				case st.in <- payload:
-				case <-st.done:
-				case <-timer.C:
-					st.close()
+				case st.in <- payload: // the usual case: no timer needed
+				default:
+					timer := time.NewTimer(muxInputStall)
+					select {
+					case st.in <- payload:
+					case <-st.done:
+					case <-timer.C:
+						st.close()
+					}
+					timer.Stop()
 				}
-				timer.Stop()
 			}
 		case muxFrameClose:
 			s.mu.Lock()
@@ -593,7 +603,16 @@ func (c *muxClient) cause() string {
 }
 
 // call sends a request and waits for its response.
+// remoteCallTimeout bounds a request to a remote helper that answers nothing,
+// so a window or the list refresh is never stuck on it.
+const remoteCallTimeout = 30 * time.Second
+
 func (c *muxClient) call(request remoteRequest) (remoteResponse, error) {
+	return c.callFor(request, remoteCallTimeout)
+}
+
+// callFor is call with its own deadline.
+func (c *muxClient) callFor(request remoteRequest, timeout time.Duration) (remoteResponse, error) {
 	c.mu.Lock()
 	if c.err != nil {
 		err := c.err
@@ -613,7 +632,14 @@ func (c *muxClient) call(request remoteRequest) (remoteResponse, error) {
 	if err != nil {
 		c.fail(fmt.Errorf("write remote request: %w", err))
 	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
+	case <-timer.C:
+		c.mu.Lock()
+		delete(c.pending, request.ID)
+		c.mu.Unlock()
+		return remoteResponse{}, fmt.Errorf("remote %s timed out after %s", request.Op, timeout)
 	case got := <-result:
 		if got.err != nil {
 			return remoteResponse{}, got.err
@@ -756,7 +782,7 @@ func (s *muxStream) Close() error {
 		s.c.mu.Unlock()
 	})
 	if first {
-		_ = s.c.w.send(s.channel, muxFrameClose, nil)
+		go s.c.w.send(s.channel, muxFrameClose, nil) // a stalled link must not hold the caller
 	}
 	return nil
 }

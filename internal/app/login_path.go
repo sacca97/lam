@@ -61,7 +61,7 @@ func loginShellPATH() string {
 	if path != "" {
 		if data, err := json.Marshal(loginPathCache{Shell: shell, Path: path, Fetched: time.Now()}); err == nil {
 			if os.MkdirAll(stateDir(), 0755) == nil {
-				_ = os.WriteFile(loginPathCacheFile(), data, 0600)
+				_ = writeFileAtomic(loginPathCacheFile(), data, 0600)
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -66,7 +67,7 @@ func saveSettings(s uiSettings) {
 	if err != nil || os.MkdirAll(stateDir(), 0755) != nil {
 		return
 	}
-	_ = os.WriteFile(settingsPath(), data, 0644)
+	_ = writeFileAtomic(settingsPath(), data, 0644)
 }
 
 // cyclePercent moves to the next (or previous) allowed terminal size.
@@ -93,4 +94,19 @@ const minSidebarWidth = 16
 // clampSidebarWidth keeps the sidebar usable and leaves room for the panes.
 func clampSidebarWidth(width, cols int) int {
 	return max(1, min(max(minSidebarWidth, min(width, cols/2)), cols-3))
+}
+
+// writeFileAtomic replaces path with data through a temporary file and a
+// rename, so a crash or a second lam writing at the same time never leaves a
+// half-written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

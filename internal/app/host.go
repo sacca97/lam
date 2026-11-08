@@ -125,8 +125,9 @@ func (c *hostClient) writeLoop() {
 }
 
 type hostSession struct {
-	awake *keepAwake
-	meter outputMeter
+	termClosed bool // set under mu when the emulator is freed; nothing may touch it after
+	awake      *keepAwake
+	meter      outputMeter
 	// resizeUntil is when the redraw a resize causes is over (unix nanoseconds).
 	resizeUntil atomic.Int64
 	snapMu      sync.Mutex // guards snap and snapAt
@@ -217,7 +218,7 @@ func runHost(name, cwd, command string) error {
 	if err := validSessionName(name); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(socketDir(), 0700); err != nil {
+	if err := ensurePrivateDir(socketDir()); err != nil {
 		return err
 	}
 	if conn, err := connectSession(name, 300*time.Millisecond); err == nil {
@@ -259,7 +260,7 @@ func runHost(name, cwd, command string) error {
 	// attributes, colors, ...) through this callback; it runs inside VTWrite,
 	// under mu. Every attached client sees the same stream but must not answer
 	// it again, so this is the one place queries are answered.
-	term, err := newHostTerminal(hostDefaultCols, hostDefaultRows, func(data []byte) { h.ptmx.Write(data) })
+	term, err := newHostTerminal(hostDefaultCols, hostDefaultRows, func(data []byte) { h.writeInput(append([]byte(nil), data...)) })
 	if err != nil {
 		cmd.Process.Kill()
 		ptmx.Close()
@@ -268,7 +269,6 @@ func runHost(name, cwd, command string) error {
 		return err
 	}
 	h.term = term
-	defer term.Close()
 
 	// Metadata goes last: List only trusts a session once it is listening.
 	if cwd == "" {
@@ -342,6 +342,14 @@ func runHost(name, cwd, command string) error {
 	}
 	h.mu.Unlock()
 	ptmx.Close()
+	select { // the reader stops once the pty is closed; free the emulator after it
+	case <-h.ptyDone:
+	case <-time.After(2 * time.Second):
+	}
+	h.mu.Lock()
+	h.termClosed = true
+	term.Close()
+	h.mu.Unlock()
 	// A host stopped by a signal (logout, reboot) leaves the terminals to the
 	// same fate; the session was not closed on purpose.
 	if !h.signaled.Load() {
@@ -384,8 +392,13 @@ func (h *hostSession) output(data []byte) {
 	now := time.Now()
 	h.lastOutputAt.Store(now.UnixNano())
 	// The redraw a program makes after a resize is not work.
-	if now.UnixNano() >= h.resizeUntil.Load() && h.meter.add(len(data), now) >= activityOutputBytes {
-		h.awake.Touch()
+	if now.UnixNano() >= h.resizeUntil.Load() {
+		if h.meter.add(len(data), now) >= activityOutputBytes {
+			h.awake.Touch()
+		}
+	}
+	if h.termClosed {
+		return
 	}
 	h.term.VTWrite(data)
 	if len(h.clients) == 0 {
@@ -643,6 +656,9 @@ func (h *hostSession) resizeLocked(cols, rows int) {
 		h.resizeUntil.Store(time.Now().Add(resizeRedrawQuiet).UnixNano())
 	}
 	h.cols, h.rows = cols, rows
+	if h.termClosed {
+		return
+	}
 	h.term.Resize(uint16(cols), uint16(rows), 8, 16)
 	pty.Setsize(h.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 }
@@ -671,6 +687,9 @@ func (h *hostSession) kill() {
 // styles, tab stops and the cursor. h.mu must be held.
 func (h *hostSession) snapshotLocked() string {
 	var b strings.Builder
+	if h.termClosed {
+		return ""
+	}
 	// Reset what a previous program may have left on the client's terminal.
 	b.WriteString("\x1b[0m\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[H\x1b[2J")
 	start, err1 := h.term.GridRef(gh.Point{Tag: gh.PointTagActive, X: 0, Y: 0})
@@ -707,6 +726,9 @@ func (h *hostSession) snapshotLocked() string {
 func (h *hostSession) history() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.termClosed {
+		return ""
+	}
 	f, err := gh.NewFormatter(h.term, gh.WithFormatterFormat(gh.FormatterFormatPlain))
 	if err != nil {
 		return ""
@@ -808,4 +830,26 @@ func (h *hostSession) drainInput() {
 			return
 		}
 	}
+}
+
+// ensurePrivateDir creates dir for this user only. A directory that exists must
+// be a real directory (not a link) owned by this user; its mode is tightened.
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s belongs to another user", dir)
+	}
+	if fi.Mode().Perm() != 0700 {
+		return os.Chmod(dir, 0700)
+	}
+	return nil
 }

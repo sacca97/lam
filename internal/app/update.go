@@ -165,11 +165,13 @@ func installRelease(r release) error {
 	if err != nil {
 		return fmt.Errorf("download %s: %w", name, err)
 	}
-	if want, ok := strings.CutPrefix(asset.Digest, "sha256:"); ok {
-		sum := sha256.Sum256(binary)
-		if hex.EncodeToString(sum[:]) != strings.ToLower(want) {
-			return fmt.Errorf("checksum mismatch for %s: not installing it", name)
-		}
+	want, ok := strings.CutPrefix(asset.Digest, "sha256:")
+	if !ok {
+		return fmt.Errorf("release %s publishes no SHA-256 for %s: not installing it", r.Tag, name)
+	}
+	sum := sha256.Sum256(binary)
+	if hex.EncodeToString(sum[:]) != strings.ToLower(want) {
+		return fmt.Errorf("checksum mismatch for %s: not installing it", name)
 	}
 	target, err := updateTarget()
 	if err != nil {

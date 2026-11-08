@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,16 +44,20 @@ const (
 	dlgUpdate
 	dlgForget
 	dlgOpenDoc
+	dlgPalette
 )
 
 type dialog struct {
 	kind     dialogKind
+	opened   time.Time // when it first drew, for the fade-in
 	field    textField
 	err      string
 	target   sessionInfo
 	restore  []manifestEntry
 	wizard   sessionWizard
-	row      int // settings row
+	row      int  // settings row
+	scroll   int  // pixels the content of a tall dialog is scrolled up
+	reveal   bool // bring the settings row into view
 	scrim    bool
 	cardTag  bool       // the card takes presses, so only the scrim around it dismisses
 	busy     bool       // connecting
@@ -66,6 +71,42 @@ type textField struct {
 	buf    []byte
 	cursor int
 	secret bool // shown as dots
+	scroll int  // pixels the text is scrolled left, to keep the caret in view
+}
+
+// sync makes the field hold s, keeping the caret where it was when s is what it
+// already shows.
+func (f *textField) sync(s string) {
+	if string(f.buf) != s {
+		f.set(s)
+	}
+}
+
+// fieldByteAt is the caret position (a byte offset into buf) nearest to x
+// pixels from the start of the shown text.
+func (g *guiApp) fieldByteAt(gtx layout.Context, f *textField, size unit.Sp, x int) int {
+	var offs []int // the caret stops: every character boundary
+	for i := 0; ; i = nextUTF8(f.buf, i) {
+		offs = append(offs, i)
+		if i == len(f.buf) {
+			break
+		}
+	}
+	width := func(i int) int {
+		cf := textField{buf: f.buf, cursor: i, secret: f.secret}
+		_, w, _ := g.shape(gtx, size, font.Normal, cf.shownBefore(), 1<<20)
+		return w
+	}
+	// The width grows with the offset: find the first stop at or past x, then
+	// the nearer of it and the one before.
+	k := sort.Search(len(offs), func(n int) bool { return width(offs[n]) >= x })
+	if k == len(offs) {
+		return offs[len(offs)-1]
+	}
+	if k > 0 && x-width(offs[k-1]) < width(offs[k])-x {
+		k--
+	}
+	return offs[k]
 }
 
 func (f *textField) set(s string)    { f.buf, f.cursor = []byte(s), len(s) }
@@ -116,20 +157,10 @@ func (f *textField) key(ev key.Event) bool {
 	return true
 }
 
-func (g *guiApp) openNewSession() {
-	host := ""
-	start := g.launchDir
-	if s, ok := g.selectedInfo(); ok {
-		host = s.Host
-		if s.CWD != "" {
-			start = s.CWD // most new sessions go next to the one being looked at
-		}
-	}
-	if host != "" && start == g.launchDir {
-		start = ""
-	}
-	g.openNewSessionIn(start, host)
-}
+// openNewSession starts the dialog for the machine whose tab is in front, not
+// the machine of the session that happens to be selected: with a host's
+// session selected and this machine's tab open, the session belongs here.
+func (g *guiApp) openNewSession() { g.openNewSessionOn(g.tabHost()) }
 
 // openNewSessionOn starts the dialog for a machine, in the folder of the
 // session being looked at when that is on the same machine.
@@ -267,6 +298,9 @@ func (g *guiApp) dialogText(s string) {
 		g.dlg.field.insert(s)
 		g.dlg.err = ""
 		g.pickEdited()
+	case dlgPalette:
+		g.dlg.field.insert(s)
+		g.dlg.row, g.dlg.scroll = 0, 0
 	case dlgAsk:
 		if !g.dlg.ask.yesNo {
 			g.dlg.field.insert(s)
@@ -296,9 +330,9 @@ func (g *guiApp) dialogKey(gtx layout.Context, ev key.Event) {
 		case esc:
 			g.closeDialog()
 		case ev.Name == key.NameUpArrow:
-			d.row = max(0, d.row-1)
+			d.row, d.reveal = max(0, d.row-1), true
 		case ev.Name == key.NameDownArrow, ev.Name == key.NameTab:
-			d.row = min(guiSettingsRows-1, d.row+1)
+			d.row, d.reveal = min(guiSettingsRows-1, d.row+1), true
 		case ev.Name == key.NameLeftArrow:
 			g.changeSetting(d.row, -1)
 		case ev.Name == key.NameRightArrow, enter, ev.Name == key.NameSpace:
@@ -323,6 +357,8 @@ func (g *guiApp) dialogKey(gtx layout.Context, ev key.Event) {
 		case enter:
 			g.confirmDialog()
 		}
+	case dlgPalette:
+		g.paletteKey(ev)
 	case dlgRename, dlgConnect, dlgOpenDoc:
 		switch {
 		case esc:
@@ -475,11 +511,13 @@ func (g *guiApp) confirmDialog() {
 				p.close()
 				delete(g.terminals, old)
 			}
-			for _, t := range ownedTerminalsNow(old) {
-				if err := renameSession(t.Name, renamedTerminal(t.Name, newName)); err != nil {
-					g.say("Rename terminal of %s: %v", old, err)
+			go func() {
+				for _, t := range ownedTerminalsNow(old) {
+					if err := renameSession(t.Name, renamedTerminal(t.Name, newName)); err != nil {
+						g.onUI(func() { g.say("Rename terminal of %s: %v", old, err) })
+					}
 				}
-			}
+			}()
 			g.closeMain()
 			g.refreshSessions()
 			g.filter = ""
@@ -512,7 +550,7 @@ func (g *guiApp) confirmDialog() {
 			g.termVisible = false
 		}
 		go clearUnread(t.Name)
-		g.refreshSessions()
+		g.refreshAsync()
 	case dlgQuitAll:
 		g.closeDialog()
 		var failed []string
@@ -533,23 +571,29 @@ func (g *guiApp) confirmDialog() {
 		}
 		if len(failed) > 0 {
 			g.say("Stop %s", strings.Join(failed, "; "))
-			g.refreshSessions()
+			g.refreshAsync()
 			return
 		}
 		g.win.Perform(system.ActionClose)
 	case dlgRestore:
 		names := restoreEntryNames(d.restore)
 		g.closeDialog()
-		restored, failures, err := g.restorer.RestoreSessions(names)
-		switch {
-		case err != nil:
-			g.say("Restore sessions: %v", err)
-		case len(failures) > 0:
-			g.say("Restored %d session(s) · %s", restored, strings.Join(failures, "; "))
-		default:
-			g.say("Restored %d session(s)", restored)
-		}
-		g.refreshSessions()
+		g.say("Restoring %d session(s)…", len(names))
+		go func() { // each agent is started again: this takes a while
+			restored, failures, err := g.restorer.RestoreSessions(names)
+			g.onUI(func() {
+				switch {
+				case err != nil:
+					g.say("Restore sessions: %v", err)
+				case len(failures) > 0:
+					g.say("Restored %d session(s) · %s", restored, strings.Join(failures, "; "))
+				default:
+					g.say("Restored %d session(s)", restored)
+				}
+			})
+			g.refreshSessions()
+			g.onUI(func() {})
+		}()
 	}
 }
 
@@ -572,6 +616,9 @@ func (g *guiApp) discardRestore() {
 func (g *guiApp) advanceNewSession() {
 	d := &g.dlg
 	w := &d.wizard
+	if w.busy {
+		return
+	}
 	switch w.stage {
 	case wizardWorkdir:
 		w.pathInput = append(w.pathInput[:0], d.field.buf...)
@@ -579,21 +626,32 @@ func (g *guiApp) advanceNewSession() {
 		if input == "" {
 			input = w.defaultDir
 		}
-		dir, err := w.src.ResolveSessionDir(input, w.defaultDir)
-		if err != nil {
-			w.error = err.Error()
-			return
-		}
-		available, err := g.launchersOn(w.host)
-		if err != nil {
-			w.error = err.Error()
-			return
-		}
-		w.workdir, w.workdirDisplay = dir, shortenHomePath(dir, w.src)
-		w.providers, w.selectedProvider = sessionProviderChoices(available, getLauncher())
-		w.sessions = g.sessionsOn(w.host)
-		w.stage = wizardProvider
-		g.resetCompletion()
+		host, src, defaultDir := w.host, w.src, w.defaultDir
+		w.error, w.busy = "", true
+		// The machine may be far away: ask it off the UI goroutine.
+		go func() {
+			dir, err := src.ResolveSessionDir(input, defaultDir)
+			var available []string
+			if err == nil {
+				available, err = g.launchersOn(host)
+			}
+			g.onUI(func() {
+				if g.dlg.kind != dlgNewSession || g.dlg.wizard.stage != wizardWorkdir {
+					return // closed or moved on meanwhile
+				}
+				w := &g.dlg.wizard
+				w.busy = false
+				if err != nil {
+					w.error = err.Error()
+					return
+				}
+				w.workdir, w.workdirDisplay = dir, shortenHomePath(dir, w.src)
+				w.providers, w.selectedProvider = sessionProviderChoices(available, getLauncher())
+				w.sessions = g.sessionsOn(w.host)
+				w.stage = wizardProvider
+				g.resetCompletion()
+			})
+		}()
 	case wizardProvider:
 		if w.selectedProvider < 0 || w.selectedProvider >= len(w.providers) {
 			w.error = "No provider is available"
@@ -606,17 +664,31 @@ func (g *guiApp) advanceNewSession() {
 		}
 		w.sessions = g.sessionsOn(w.host)
 		name := hostPrefix(w.host) + w.nameFor(w.selectedProvider)
-		if err := newSession(name, w.workdir, command); err != nil {
-			w.error = err.Error()
-			return
-		}
-		if launcher != "terminal" {
-			setLauncher(launcher)
-		}
-		g.closeDialog()
-		g.refreshSessions()
-		g.filter = ""
-		g.selectSession(name)
+		workdir := w.workdir
+		w.error, w.busy = "", true
+		go func() {
+			err := newSession(name, workdir, command)
+			if err == nil {
+				g.refreshSessions() // so the new row exists when it is selected
+			}
+			g.onUI(func() {
+				if g.dlg.kind != dlgNewSession {
+					return
+				}
+				w := &g.dlg.wizard
+				w.busy = false
+				if err != nil {
+					w.error = err.Error()
+					return
+				}
+				if launcher != "terminal" {
+					setLauncher(launcher)
+				}
+				g.closeDialog()
+				g.filter = ""
+				g.selectSession(name)
+			})
+		}()
 	}
 }
 
@@ -760,6 +832,7 @@ func guiShortcuts() [][2]string {
 	if guiMac {
 		return [][2]string{
 			{"Click a pane", "Type into it"},
+			{"⌘K", "Command palette: any session or action"},
 			{"⌘N", "New session"},
 			{"⌘T", "Toggle the session's terminal"},
 			{"⌘R", "Rename session"},
@@ -775,6 +848,7 @@ func guiShortcuts() [][2]string {
 			{"⇧drag", "Select in programs that use the mouse"},
 			{"⌘= / ⌘- / ⌘0", "Text size"},
 			{"⌘B, F2", "Toggle sidebar"},
+			{"⌘-click a link or .md/.pdf path", "Open it"},
 			{"⌘,", "Settings"},
 			{"⌘⇧Q", "Stop all sessions and quit"},
 			{"⌘Q, close the window", "Quit; sessions keep running"},
@@ -782,6 +856,7 @@ func guiShortcuts() [][2]string {
 	}
 	return [][2]string{
 		{"Click a pane", "Type into it"},
+		{"Ctrl+Shift+K", "Command palette: any session or action"},
 		{"Ctrl+Shift+N", "New session"},
 		{"Ctrl+Shift+T", "Toggle the session's terminal"},
 		{"Ctrl+Shift+R", "Rename session"},
@@ -797,6 +872,7 @@ func guiShortcuts() [][2]string {
 		{"Shift+drag", "Select in programs that use the mouse"},
 		{"Ctrl+Shift+= / - / 0", "Text size"},
 		{"Ctrl+Shift+B, F2", "Toggle sidebar"},
+		{"Ctrl-click a link or .md/.pdf path", "Open it"},
 		{"Ctrl+Shift+,", "Settings"},
 		{"Ctrl+Shift+Q", "Stop all sessions and quit"},
 		{"Close the window", "Quit; sessions keep running"},
@@ -805,6 +881,10 @@ func guiShortcuts() [][2]string {
 
 // layoutDialog draws the open dialog over a dimmed window.
 func (g *guiApp) layoutDialog(gtx layout.Context) {
+	if g.dlg.kind == dlgPalette {
+		g.layoutPalette(gtx)
+		return
+	}
 	size := gtx.Constraints.Max
 	d := &g.dlg
 	// The scrim takes the pointer; clicking it cancels a dialog that asks nothing.
@@ -851,7 +931,7 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	case dlgQuitAll:
 		title, ok, cancel, danger = "Stop everything", "Stop all", "Cancel", true
 		body = quitAllBody(g.allSessions(), false)
-		if g.remote {
+		if g.remote.Load() {
 			body[0] = strings.Replace(body[0], "session(s)", "session(s) here and on the remote host", 1)
 		}
 		body[0] = strings.Replace(body[0], " and quit?", " and close lam?", 1)
@@ -863,7 +943,7 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 		if d.busy {
 			ok = ""
 		}
-		if g.remote {
+		if g.remote.Load() {
 			_, host := g.mb.Remote()
 			body = []string{"Connected to " + host + ". Leave it empty to disconnect."}
 		}
@@ -921,19 +1001,35 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	errText := d.err
 	if d.kind == dlgNewSession {
 		errText = d.wizard.error
+		if d.wizard.busy {
+			errText = "Working…"
+		}
 	}
 	if errText != "" {
 		contentH += lineH
 	}
 	h := pad + gtx.Dp(34) + contentH + gtx.Dp(58)
+	// A card taller than the window keeps its title and buttons and scrolls
+	// its content (the settings and the shortcuts).
+	maxScroll := 0
+	if scrolls := d.kind == dlgSettings || d.kind == dlgHelp; scrolls && h > size.Y-gtx.Dp(32) {
+		full := h
+		h = max(size.Y-gtx.Dp(32), pad+gtx.Dp(34)+gtx.Dp(58)+lineH)
+		maxScroll = full - h
+	}
+	d.scroll = max(0, min(d.scroll, maxScroll))
 	top := max(gtx.Dp(16), (size.Y-h)/2)
 	card := image.Rect((size.X-w)/2, top, (size.X+w)/2, top+h)
 	cardArea := clip.Rect(card).Push(gtx.Ops)
 	event.Op(gtx.Ops, &d.cardTag)
 	cardArea.Pop()
 	for {
-		if _, ok := gtx.Event(pointer.Filter{Target: &d.cardTag, Kinds: pointer.Press}); !ok {
+		ev, ok := gtx.Event(pointer.Filter{Target: &d.cardTag, Kinds: pointer.Press | pointer.Scroll, ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20}})
+		if !ok {
 			break
+		}
+		if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Scroll {
+			d.scroll = max(0, min(d.scroll+int(pe.Scroll.Y), maxScroll))
 		}
 	}
 	// A soft shadow, then the card with a hairline border.
@@ -953,6 +1049,13 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 	for _, line := range body {
 		g.drawText(gtx, image.Pt(pad, y), g.th.UISize, font.Normal, g.th.TextDim, line, inner)
 		y += lineH
+	}
+	endView := func() {}
+	var view image.Rectangle // the part of a scrolling card the content shows in
+	if maxScroll > 0 {
+		view = image.Rect(0, y, w, h-gtx.Dp(58)+gtx.Dp(6))
+		endView = clip.Rect(view).Push(gtx.Ops).Pop
+		y -= d.scroll
 	}
 	switch d.kind {
 	case dlgRename:
@@ -1080,6 +1183,16 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 				y += gtx.Dp(settingHeadH)
 			}
 			r := image.Rect(pad, y, pad+inner, y+gtx.Dp(settingRowH))
+			if d.reveal && i == d.row && maxScroll > 0 {
+				// The keys moved to a row out of view: scroll it in, next frame.
+				if r.Min.Y < view.Min.Y {
+					d.scroll -= view.Min.Y - r.Min.Y
+				} else if r.Max.Y > view.Max.Y-gtx.Dp(6) {
+					d.scroll += r.Max.Y - view.Max.Y + gtx.Dp(6)
+				}
+				d.reveal = false
+				gtx.Execute(op.InvalidateCmd{})
+			}
 			id := fmt.Sprintf("set-%d", i)
 			c := g.clickable(id)
 			if c.Clicked(gtx) {
@@ -1115,8 +1228,13 @@ func (g *guiApp) layoutDialog(gtx layout.Context) {
 			y += lineH
 		}
 	}
+	endView()
 	if errText != "" {
-		g.drawText(gtx, image.Pt(pad, y), g.th.SmallSize, font.Normal, g.th.Unread, errText, inner)
+		col := g.th.Unread
+		if d.kind == dlgNewSession && d.wizard.busy {
+			col = g.th.TextDim
+		}
+		g.drawText(gtx, image.Pt(pad, y), g.th.SmallSize, font.Normal, col, errText, inner)
 	}
 
 	// Buttons, right aligned.
@@ -1150,16 +1268,54 @@ func (g *guiApp) drawField(gtx layout.Context, r image.Rectangle, f *textField, 
 	rr := clip.UniformRRect(r, gtx.Dp(8))
 	paint.FillShape(gtx.Ops, g.th.Surface, rr.Op(gtx.Ops))
 	paint.FillShape(gtx.Ops, g.th.Accent, clip.Stroke{Path: rr.Path(gtx.Ops), Width: float32(max(1, gtx.Dp(1)))}.Op())
-	tx, cy := r.Min.X+gtx.Dp(10), r.Min.Y+r.Dy()/2
-	maxW := r.Dx() - gtx.Dp(20)
-	if len(f.buf) == 0 && placeholder != "" {
-		g.drawTextMid(gtx, image.Pt(tx, cy), g.th.UISize, font.Normal, g.th.TextFaint, placeholder, maxW)
-	} else {
-		g.drawTextMid(gtx, image.Pt(tx, cy), g.th.UISize, font.Normal, g.th.Text, f.shown(), maxW)
+	cy := r.Min.Y + r.Dy()/2
+	g.fieldText(gtx, f, image.Rect(r.Min.X+gtx.Dp(10), r.Min.Y, r.Max.X-gtx.Dp(10), r.Max.Y), cy, g.th.UISize, g.th.Text, placeholder, true)
+}
+
+// fieldText draws a field's text inside area, scrolled so that the caret stays
+// in view, and moves the caret to where a press lands. It is what the
+// dialogs' fields and the sidebar's search share. It reports whether a press
+// landed on it.
+func (g *guiApp) fieldText(gtx layout.Context, f *textField, area image.Rectangle, cy int, size unit.Sp, col color.NRGBA, placeholder string, caret bool) (pressed bool) {
+	maxW := area.Dx()
+	shown := f.shown()
+	_, cw, _ := g.shape(gtx, size, font.Normal, f.shownBefore(), 1<<20)
+	_, tw, _ := g.shape(gtx, size, font.Normal, shown, 1<<20)
+	if cw-f.scroll > maxW {
+		f.scroll = cw - maxW
 	}
-	_, cw, _ := g.shape(gtx, g.th.UISize, font.Normal, f.shownBefore(), 1<<20)
-	cx := tx + min(cw, maxW)
-	paint.FillShape(gtx.Ops, g.th.Text, clip.Rect{Min: image.Pt(cx, cy-gtx.Dp(9)), Max: image.Pt(cx+max(1, gtx.Dp(1)), cy+gtx.Dp(9))}.Op())
+	if cw < f.scroll {
+		f.scroll = cw
+	}
+	f.scroll = max(0, min(f.scroll, tw-maxW+gtx.Dp(2)))
+
+	hit := clip.Rect(area).Push(gtx.Ops)
+	event.Op(gtx.Ops, f)
+	pointer.CursorText.Add(gtx.Ops)
+	hit.Pop()
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: f, Kinds: pointer.Press})
+		if !ok {
+			break
+		}
+		if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Press {
+			f.cursor = g.fieldByteAt(gtx, f, size, int(pe.Position.X)-area.Min.X+f.scroll)
+			pressed = true
+		}
+	}
+
+	defer clip.Rect(area).Push(gtx.Ops).Pop()
+	if len(f.buf) == 0 && placeholder != "" {
+		g.drawTextMid(gtx, image.Pt(area.Min.X, cy), size, font.Normal, g.th.TextFaint, placeholder, 1<<20)
+	} else {
+		g.drawTextMid(gtx, image.Pt(area.Min.X-f.scroll, cy), size, font.Normal, col, shown, 1<<20)
+	}
+	if caret {
+		cx := area.Min.X + cw - f.scroll
+		half := gtx.Dp(9)
+		paint.FillShape(gtx.Ops, g.th.Text, clip.Rect{Min: image.Pt(cx, cy-half), Max: image.Pt(cx+max(1, gtx.Dp(1)), cy+half)}.Op())
+	}
+	return pressed
 }
 
 // rowMenu is the context menu of a session in the sidebar.
@@ -1181,6 +1337,7 @@ func (g *guiApp) layoutMenu(gtx layout.Context) {
 		run    func()
 	}{
 		{termLabel, false, g.toggleTerminal},
+		{"Show beside", false, func() { g.openBeside(m.s.Name) }},
 		{"Rename…", false, func() { g.openRename(m.s) }},
 		{"New session here…", false, func() { g.openNewSessionIn(m.s.CWD, m.s.Host) }},
 		{"Stop…", true, func() { g.openStop(m.s) }},

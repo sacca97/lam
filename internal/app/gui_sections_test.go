@@ -19,7 +19,7 @@ func TestGUISidebarShowsOneMachineAtATime(t *testing.T) {
 	e := testPane(t, 100, 30)
 	g := newTestApp(t, e)
 	g.mb.SetRemote(&fakeBackend{name: "ssh:build-box"})
-	g.remote = true
+	g.remote.Store(true)
 	g.sessions = append(g.sessions,
 		sessionInfo{Name: "build-box/claude-api", Host: "build-box", CWD: "/home/user/src/api", Command: "claude", Activity: "active"},
 		sessionInfo{Name: "build-box/shell-data", Host: "build-box", CWD: "/srv/data", Shell: true, Activity: "quiet"},
@@ -250,5 +250,135 @@ func TestGUISidebarStepsThroughUnreadWithoutSkipping(t *testing.T) {
 	g.stepSession(1)
 	if g.selected != below {
 		t.Fatalf("next from b went to %q, the row under it is %q (%v)", g.selected, below, before)
+	}
+}
+
+// A new session is for the machine whose tab is in front, even when the
+// selected session is on another one.
+func TestGUINewSessionFollowsTheTabInFront(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.mb.SetRemote(&fakeBackend{name: "ssh:build-box"})
+	g.remote.Store(true)
+	g.mu.Lock()
+	g.sessions = append(g.sessions, sessionInfo{Name: "build-box/claude", Host: "build-box", CWD: "/srv/api", Command: "claude"})
+	g.mu.Unlock()
+	g.selectSession("build-box/claude") // brings the host's tab to the front
+	if g.tabHost() != "build-box" {
+		t.Fatalf("tab host = %q", g.tabHost())
+	}
+	g.sideHost = "" // the person clicks this machine's tab
+	g.openNewSession()
+	if g.dlg.kind != dlgNewSession || g.dlg.wizard.host != "" {
+		t.Fatalf("the dialog is for host %q, want this machine", g.dlg.wizard.host)
+	}
+	g.closeDialog()
+	g.sideHost = "build-box"
+	g.openNewSession()
+	if g.dlg.wizard.host != "build-box" {
+		t.Fatalf("the dialog is for host %q, want build-box", g.dlg.wizard.host)
+	}
+}
+
+// A card taller than the window keeps its title and buttons and scrolls its
+// content: the last setting can be reached on a short window.
+func TestGUISettingsScrollOnAShortWindow(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.dlg = dialog{kind: dlgSettings}
+	renderGUI(t, g, 900, 420, 1)
+	if g.dlg.scroll != 0 {
+		t.Fatalf("scrolled before anything moved: %d", g.dlg.scroll)
+	}
+	g.dlg.row, g.dlg.reveal = guiSettingsRows-1, true
+	for range 3 {
+		renderGUI(t, g, 900, 420, 1)
+	}
+	if g.dlg.scroll == 0 {
+		t.Fatal("the last row was not scrolled into view")
+	}
+	img := renderGUI(t, g, 900, 420, 1)
+	dir := os.Getenv("GUI_SHOT_DIR")
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	f, _ := os.Create(dir + "/gui-settings-short.png")
+	png.Encode(f, img)
+	f.Close()
+}
+
+// A field scrolls to keep its caret in view, and a press puts the caret there.
+func TestGUIFieldScrollsAndTakesAClick(t *testing.T) {
+	e := testPane(t, 80, 24)
+	g := newTestApp(t, e)
+	g.openRename(sessionInfo{Name: "x"})
+	g.dlg.field.set(strings.Repeat("a long folder name/", 12))
+	d := &guiDriver{t: t, g: g}
+	d.frame()
+	d.frame()
+	if g.dlg.field.scroll == 0 {
+		t.Fatal("a long text did not scroll to the caret")
+	}
+	// Press at the left edge of the field: the caret goes to the start of what shows.
+	p := f32.Pt(300, 344)
+	d.router.Queue(pointer.Event{Kind: pointer.Move, Source: pointer.Mouse, Position: p, Time: time.Millisecond},
+		pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p, Time: 2 * time.Millisecond},
+		pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: p, Time: 3 * time.Millisecond})
+	d.frame()
+	d.frame()
+	if c := g.dlg.field.cursor; c == len(g.dlg.field.buf) || c == 0 {
+		t.Fatalf("caret after the press = %d of %d", c, len(g.dlg.field.buf))
+	}
+}
+
+// The sidebar's own button hides it, and the header's brings it back.
+func TestGUISidebarToggleButtons(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	d := &guiDriver{t: t, g: g}
+	d.frame()
+	d.frame()
+	if _, ok := g.buttons["side-toggle"]; !ok {
+		t.Fatal("no hide button in the sidebar")
+	}
+	g.hideSide = true
+	d.frame()
+	d.frame()
+	if _, ok := g.buttons["side-show"]; !ok {
+		t.Fatal("no show button in the header")
+	}
+	img := renderGUI(t, g, 1240, 720, 1)
+	dir := os.Getenv("GUI_SHOT_DIR")
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	f, _ := os.Create(dir + "/gui-side-hidden.png")
+	png.Encode(f, img)
+	f.Close()
+}
+
+// Messages stack, go by themselves, can be clicked away, and may carry an action.
+func TestGUIToastsStackAndAct(t *testing.T) {
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	d := &guiDriver{t: t, g: g}
+	ran := false
+	g.say("first")
+	g.say("first") // the same message is not stacked twice
+	g.sayAction("Retry", func() { ran = true }, "second")
+	if len(g.toasts) != 2 {
+		t.Fatalf("toasts = %d", len(g.toasts))
+	}
+	d.frame()
+	d.frame()
+	g.hits["toast-act-1"] = true
+	d.frame()
+	if !ran || len(g.toasts) != 1 {
+		t.Fatalf("action ran %v, toasts left %d", ran, len(g.toasts))
+	}
+	g.toasts[0].until = time.Now().Add(-time.Second)
+	d.frame()
+	if len(g.toasts) != 0 {
+		t.Fatal("an expired toast stayed")
 	}
 }

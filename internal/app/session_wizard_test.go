@@ -10,7 +10,7 @@ func TestSessionWizardProviderScreenHighlightsSelection(t *testing.T) {
 		stage:            wizardProvider,
 		workdir:          "/home/me/repo",
 		workdirDisplay:   "~/repo",
-		sessions:         []sessionInfo{{Name: "codex-repo"}},
+		sessions:         []sessionInfo{{Name: "codex"}},
 		providers:        []string{"claude", "codex", "terminal"},
 		selectedProvider: 1,
 	}
@@ -19,7 +19,7 @@ func TestSessionWizardProviderScreenHighlightsSelection(t *testing.T) {
 	if !strings.Contains(joined, "Choose how to start (last used highlighted):") || !strings.Contains(joined, "\033[32m  › Codex\033[0m") || !strings.Contains(joined, "Terminal") {
 		t.Fatalf("provider screen does not show the selected provider:\n%s", joined)
 	}
-	if !strings.Contains(joined, "codex-repo-1 · ~/repo") {
+	if !strings.Contains(joined, "codex-1 · ~/repo") {
 		t.Fatalf("provider screen does not show the generated name:\n%s", joined)
 	}
 	if row != -1 {

@@ -207,7 +207,7 @@ func notifyText(s string) string {
 		return r
 	}, s)
 	if len(s) > 200 {
-		s = s[:200]
+		s = strings.ToValidUTF8(s[:200], "")
 	}
 	return s
 }

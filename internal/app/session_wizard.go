@@ -32,6 +32,7 @@ type sessionWizard struct {
 	showCompletions   bool
 	error             string
 	promptEnabled     bool
+	busy              bool // a remote or slow step is running in the background
 }
 
 func (w sessionWizard) screen(input []byte, maxRows int) (lines []string, cursorRow, cursorCol int) {
@@ -112,7 +113,7 @@ func (w sessionWizard) nameFor(i int) string {
 	if i >= 0 && i < len(w.providers) {
 		provider = w.providers[i]
 	}
-	return launcherSessionName(provider, w.workdir, w.sessions)
+	return launcherSessionName(provider, w.sessions)
 }
 
 func sessionProviderChoices(available []string, lastUsed string) ([]string, int) {
