@@ -319,10 +319,7 @@ func (g *guiApp) applySessions(list []sessionInfo, err error) (changed bool) {
 	seen := map[string]bool{}
 	for _, s := range list {
 		seen[s.Name] = true
-		status := s.Activity
-		if s.Unread {
-			status = "unread"
-		}
+		status := s.Phase().String()
 		if prev, ok := g.lastStatus[s.Name]; ok && prev != status {
 			g.statusSince[s.Name] = now
 		}
@@ -366,7 +363,7 @@ func (g *guiApp) refreshSessions() (changed bool) {
 	if g.remote.Load() {
 		// The agents run elsewhere; this machine must stay up to keep the link.
 		for _, s := range list {
-			if s.Host != "" && s.Activity == "active" {
+			if s.Host != "" && s.Working() {
 				guiAwake.Touch()
 				break
 			}
@@ -1420,9 +1417,9 @@ func (g *guiApp) layoutHeader(gtx layout.Context, width, h int) {
 		// A document is in front: its tab, with Reload at the right.
 		xr := x - gtx.Dp(8)
 		g.mu.Lock()
-		docLoading := g.doc.loading
+		docBusy := g.doc.state == docLoading
 		g.mu.Unlock()
-		if !docLoading {
+		if !docBusy {
 			xr -= g.button(gtx, "doc-reload", "Reload", image.Pt(xr, cy), true, false) + gtx.Dp(8)
 			if g.clicked(gtx, "doc-reload") {
 				g.loadDocument(g.doc)
@@ -1829,7 +1826,7 @@ func (g *guiApp) filterInsert(text string) {
 // guiRow is one line of the session list: a project heading or a session.
 type guiRow struct {
 	stateHead bool // the heading over the sessions in one state; state says which
-	state     int
+	state     sessionPhase
 	header    bool
 	host      string // the machine, for a project heading
 	first     bool   // a project heading right under its section heading
@@ -1875,25 +1872,6 @@ func (g *guiApp) cachedRows() []guiRow {
 	return c.rows
 }
 
-// sidebar states, in the order they are listed.
-const (
-	stateUnread = iota
-	stateWorking
-	stateIdle
-)
-
-func sidebarState(s sessionInfo) int {
-	switch {
-	case s.Unread:
-		return stateUnread
-	case s.Activity == "active":
-		return stateWorking
-	}
-	return stateIdle
-}
-
-var stateNames = [...]string{"Unread", "Working", "Idle"} // Unread: finished, and not looked at yet
-
 // tabHost is the machine the sidebar shows: "" for this one. A host that is
 // no longer connected falls back to this machine.
 func (g *guiApp) tabHost() string {
@@ -1937,12 +1915,12 @@ func (g *guiApp) folderRows(list []sessionInfo) []guiRow {
 }
 
 func (g *guiApp) stateRows(list []sessionInfo) []guiRow {
-	var buckets [len(stateNames)][]sessionInfo
+	var buckets [len(sessionPhaseNames)][]sessionInfo
 	g.mu.Lock()
 	hold := g.holdName
 	g.mu.Unlock()
 	for _, s := range list {
-		st := sidebarState(s)
+		st := s.Phase()
 		if s.Name == hold && st == stateIdle {
 			st = stateUnread // read by selecting it: it stays until another is selected, or it works again
 		}
@@ -1956,11 +1934,12 @@ func (g *guiApp) stateRows(list []sessionInfo) []guiRow {
 	}
 	g.mu.Unlock()
 	var rows []guiRow
-	for st, b := range buckets {
+	for i, b := range buckets {
+		st := sessionPhase(i)
 		if len(b) == 0 {
 			continue
 		}
-		rows = append(rows, guiRow{stateHead: true, state: st, label: stateNames[st], count: len(b), first: len(rows) == 0})
+		rows = append(rows, guiRow{stateHead: true, state: st, label: st.Label(), count: len(b), first: len(rows) == 0})
 		for _, s := range b {
 			rows = append(rows, guiRow{s: s})
 		}

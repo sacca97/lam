@@ -27,7 +27,7 @@ func waitDoc(t *testing.T, g *guiApp) {
 	t.Helper()
 	for i := 0; i < 200; i++ {
 		g.mu.Lock()
-		loading := g.doc != nil && g.doc.loading
+		loading := g.doc != nil && g.doc.state == docLoading
 		g.mu.Unlock()
 		if !loading {
 			return
@@ -741,5 +741,19 @@ func TestGUIDocumentTabClosesOnMiddleClick(t *testing.T) {
 	middle(430, 23) // alpha's tab
 	if len(g.docs) != 1 || filepath.Base(g.docs[0].path) != "beta.md" {
 		t.Fatalf("the wheel left %d tabs", len(g.docs))
+	}
+}
+
+func TestDocViewTransitionsAreEnforced(t *testing.T) {
+	dv := &docView{state: docLoading}
+	if !dv.transition(docFailed) || dv.state != docFailed {
+		t.Fatal("loading → failed")
+	}
+	if dv.transition(docReady) {
+		t.Fatal("failed → ready must go through loading")
+	}
+	dv.transition(docClosed)
+	if dv.transition(docLoading) || dv.state != docClosed {
+		t.Fatal("a closed document came back")
 	}
 }

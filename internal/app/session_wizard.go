@@ -7,14 +7,20 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// wizardStage is the step of the new-session form. It moves forward with
+// Enter (workdir → provider, after the folder is resolved; sessionWizard.busy
+// is set while that or the creation runs in the background) and back with Esc;
+// the prompt stage is the terminal interface's optional last step.
+type wizardStage string
+
 const (
-	wizardPrompt   = "prompt"
-	wizardWorkdir  = "workdir"
-	wizardProvider = "provider"
+	wizardPrompt   wizardStage = "prompt"
+	wizardWorkdir  wizardStage = "workdir"
+	wizardProvider wizardStage = "provider"
 )
 
 type sessionWizard struct {
-	stage             string
+	stage             wizardStage
 	host              string                 // the remote machine the session is for; empty for this one
 	src               sessionDirectorySource // where its folders are browsed; nil means the default
 	sessions          []sessionInfo          // existing sessions, which the generated name must not collide with

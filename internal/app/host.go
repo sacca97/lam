@@ -255,7 +255,7 @@ func runHost(name, cwd, command string) error {
 		exited:  make(chan struct{}),
 		ptyDone: make(chan struct{}),
 	}
-	h.awake.still = func() bool { return h.activitySnapshot().State == "active" }
+	h.awake.still = func() bool { return h.activitySnapshot().State == activityActive }
 	// The terminal answers the program's queries (cursor position, device
 	// attributes, colors, ...) through this callback; it runs inside VTWrite,
 	// under mu. Every attached client sees the same stream but must not answer
@@ -524,7 +524,7 @@ func (h *hostSession) handleConn(conn net.Conn) {
 		attachedClients := len(h.clients)
 		h.mu.Unlock()
 		snapshot := h.activitySnapshot()
-		if snapshot.State == "active" {
+		if snapshot.State == activityActive {
 			h.awake.Touch() // work that prints nothing still keeps the machine up
 		}
 		snapshot.AttachedClients = attachedClients

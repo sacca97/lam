@@ -53,13 +53,22 @@ const (
 
 var docDeskBg = color.NRGBA{R: 225, G: 228, B: 232, A: 255}
 
+// transition moves the document to a state, reporting whether that was
+// allowed (see doc_state.go). guiApp.mu must be held.
+func (dv *docView) transition(to docState) bool {
+	if !docMayMove(dv.state, to) {
+		return false
+	}
+	dv.state = to
+	return true
+}
+
 type docView struct {
 	host, path string
 	kind       docKind
-	loading    bool
-	err        string
-	gen        int // bumped by every load, so a late answer is dropped
-	closed     bool
+	state      docState // see doc_state.go; guarded by guiApp.mu
+	err        string   // why it is docFailed
+	gen        int      // bumped by every load, so a late answer is dropped
 
 	mu       sync.Mutex // guards what the render goroutines fill in
 	data     []byte
@@ -145,7 +154,7 @@ func (g *guiApp) openDocument(host, p string) {
 		if dv.host == host && dv.path == p {
 			g.doc = dv // already open: its tab comes to the front
 			g.mu.Lock()
-			failed := dv.err != ""
+			failed := dv.state == docFailed
 			g.mu.Unlock()
 			if failed {
 				g.loadDocument(dv)
@@ -153,7 +162,7 @@ func (g *guiApp) openDocument(host, p string) {
 			return
 		}
 	}
-	dv := &docView{host: host, path: p, kind: documentKind(p), zoom: 1, loading: true}
+	dv := &docView{host: host, path: p, kind: documentKind(p), zoom: 1, state: docLoading}
 	g.docs = append(g.docs, dv)
 	g.doc = dv
 	g.loadDocument(dv)
@@ -164,7 +173,8 @@ func (g *guiApp) loadDocument(dv *docView) {
 	g.mu.Lock()
 	dv.gen++
 	gen := dv.gen
-	dv.loading, dv.err = true, ""
+	dv.transition(docLoading) // refused for a closed tab
+	dv.err = ""
 	g.mu.Unlock()
 	src := g.documentSourceFor(dv.host)
 	go func() {
@@ -178,16 +188,17 @@ func (g *guiApp) loadDocument(dv *docView) {
 		}
 		g.mu.Lock()
 		defer g.mu.Unlock()
-		if dv.closed || dv.gen != gen {
+		if dv.state == docClosed || dv.gen != gen {
 			if pdf != nil {
 				pdf.Close()
 			}
 			return
 		}
-		dv.loading = false
 		if err != nil {
+			dv.transition(docFailed)
 			dv.err = err.Error()
 		} else {
+			dv.transition(docReady)
 			dv.mu.Lock()
 			old := dv.pdf
 			dv.data, dv.modified, dv.pdf = d.Data, d.Modified, pdf
@@ -219,7 +230,7 @@ func (g *guiApp) closeDocTab(dv *docView) {
 	}
 	g.docs = slices.Delete(g.docs, i, i+1)
 	g.mu.Lock() // the load goroutine reads these under it
-	dv.closed = true
+	dv.transition(docClosed)
 	dv.gen++
 	g.mu.Unlock()
 	if g.doc == dv {
@@ -582,17 +593,17 @@ func (g *guiApp) layoutDoc(gtx layout.Context, r image.Rectangle) {
 		dv.md, dv.hasSel, dv.selecting = nil, false, false
 	}
 	g.mu.Lock()
-	loading, errText := dv.loading, dv.err
+	state, errText := dv.state, dv.err
 	g.mu.Unlock()
 	msg := func(s string, c color.NRGBA) {
 		paint.FillShape(gtx.Ops, g.th.TermBg, clip.Rect(r).Op())
 		g.drawText(gtx, image.Pt(r.Min.X+gtx.Dp(24), r.Min.Y+gtx.Dp(24)), g.th.UISize, font.Normal, c, s, r.Dx()-gtx.Dp(48))
 	}
 	switch {
-	case loading:
+	case state == docLoading:
 		msg("Opening "+path.Base(dv.path)+"…", g.th.TextDim)
 		return
-	case errText != "":
+	case state == docFailed:
 		msg(errText, g.th.Unread)
 		return
 	}

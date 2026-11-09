@@ -9,9 +9,9 @@ import (
 
 func sessionActivity(s sessionInfo) (active, known bool) {
 	switch s.Activity {
-	case "quiet":
+	case activityQuiet:
 		return false, true
-	case "active":
+	case activityActive:
 		return true, true
 	default:
 		return false, false

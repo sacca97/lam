@@ -79,6 +79,8 @@ page (the renderer is PDFium, built into the window version of `lam`, nothing to
 wheel or the keys, zoom with `Ctrl` and the wheel or `Ctrl+=`/`Ctrl+-`, `R` reloads. Several files can be open at once; each is a tab with a cross (a click of the wheel on a tab closes it too), `Ctrl+W` (`⌘W` on a Mac) closes the one in front, and `Ctrl+Tab` goes round the tabs. Files up
 to 2 MB (markdown) and 128 MB (PDF) open.
 
+`lam ls --json` and `lam ps --json` list the sessions for scripts and agents; each has `"state"`: `"working"`, `"unread"` (finished, not looked at yet) or `"idle"`. The state machines behind it are in [docs/state-machines.md](docs/state-machines.md).
+
 `lam` opens the shared session list, so you do not need to name or attach to an existing session
 to get back to it. `lam attach <session>` remains available when you want to connect directly to
 one session without opening the interface. `lam new` is an alias for `lam start`.

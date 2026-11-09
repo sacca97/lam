@@ -66,12 +66,12 @@ func (w *finishWatcher) update(sessions []sessionInfo, now time.Time) []sessionI
 		}
 		since, wasActive := w.activeSince[s.Name]
 		switch s.Activity {
-		case "active":
+		case activityActive:
 			delete(w.quietSince, s.Name)
 			if !wasActive {
 				w.activeSince[s.Name] = now
 			}
-		case "quiet":
+		case activityQuiet:
 			if !wasActive {
 				break
 			}

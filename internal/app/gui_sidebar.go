@@ -73,7 +73,7 @@ func (g *guiApp) statusOf(s sessionInfo, now time.Time) (status string, col colo
 	switch {
 	case s.Unread:
 		return "unread", g.th.Unread, age
-	case s.Activity == "active":
+	case s.Working():
 		return "working", g.th.Accent, age
 	}
 	return "", g.th.TextFaint, age
@@ -187,7 +187,7 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 		animate := false
 		g.nextAge = time.Time{}
 		g.list.Layout(lg, len(rows), func(gtx layout.Context, i int) layout.Dimensions {
-			if !rows[i].header && !rows[i].stateHead && rows[i].s.Activity == "active" {
+			if !rows[i].header && !rows[i].stateHead && rows[i].s.Working() {
 				animate = true
 			}
 			return g.layoutRow(gtx, rows[i], pad, now)
@@ -228,7 +228,7 @@ func (g *guiApp) layoutSidebar(gtx layout.Context) {
 	for _, s := range g.allSessions() {
 		switch {
 		case s.Shell:
-		case s.Activity == "active":
+		case s.Working():
 			active++
 		default:
 			idle++
@@ -783,7 +783,7 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 		label = sessionLabel(s)
 	}
 	nameCol, weight := g.th.TextDim, font.Medium
-	if selected || s.Unread || s.Activity == "active" {
+	if selected || s.Unread || s.Working() {
 		nameCol = g.th.Text
 	}
 	nameW := g.drawTextMid(gtx, image.Pt(x, cy), g.th.UISize, weight, nameCol, label, right-x)
@@ -805,7 +805,7 @@ func (g *guiApp) layoutRow(gtx layout.Context, r guiRow, pad int, now time.Time)
 	pt.Pop()
 	if hovered && !menuOpen {
 		// What the row cannot show on one line: its program, state and folder.
-		state := stateNames[sidebarState(s)]
+		state := s.Phase().Label()
 		head := providerName(s) + " · " + state + " · "
 		_, hw, _ := g.shape(gtx, g.th.TinySize, font.Medium, head, 1<<20)
 		g.tooltip(gtx, image.Rect(inner.Min.X, inner.Min.Y, inner.Max.X, inner.Max.Y), head+g.fitPath(gtx, s.CWD, s.Host, w-hw-gtx.Dp(40)))
@@ -826,7 +826,7 @@ func (g *guiApp) statusDot(gtx layout.Context, c image.Point, s sessionInfo, now
 	switch {
 	case s.Unread:
 		circle(r, g.th.Unread)
-	case s.Activity == "active":
+	case s.Working():
 		phase := 0.5 + 0.5*math.Sin(float64(now.UnixMilli()%1600)/1600*2*math.Pi)
 		halo := g.th.Accent
 		halo.A = uint8(40 + 50*phase)

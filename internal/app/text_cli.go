@@ -19,6 +19,7 @@ type lsEntry struct {
 	CWD      string `json:"cwd"`
 	Command  string `json:"command"`
 	Activity string `json:"activity,omitempty"`
+	State    string `json:"state"` // "working", "unread" (finished, not looked at yet) or "idle": the one reading of activity and unread
 	Unread   bool   `json:"unread"`
 	Shell    bool   `json:"shell"`
 	PID      string `json:"pid,omitempty"`
@@ -44,7 +45,7 @@ func writeLs(w io.Writer, sessions []sessionInfo, asJSON bool) error {
 	if asJSON {
 		out := make([]lsEntry, 0, len(sessions))
 		for _, s := range sessions {
-			out = append(out, lsEntry{s.Name, s.CWD, s.Command, s.Activity, s.Unread, s.Shell, s.PanePID, s.Clients})
+			out = append(out, lsEntry{s.Name, s.CWD, s.Command, s.Activity, s.Phase().String(), s.Unread, s.Shell, s.PanePID, s.Clients})
 		}
 		return json.NewEncoder(w).Encode(out)
 	}

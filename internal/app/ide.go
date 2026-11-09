@@ -1720,7 +1720,7 @@ func runIDEWithInitialSession(promptMe bool, launchDir, initialSession string) e
 		draw()
 	}
 
-	setWizardStage := func(stage string, value []byte) {
+	setWizardStage := func(stage wizardStage, value []byte) {
 		wizard.stage = stage
 		textBuf = append(textBuf[:0], value...)
 		wizard.cursor = len(textBuf)

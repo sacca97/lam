@@ -58,25 +58,25 @@ func classifyActivity(s activitySignals) string {
 	// an agent CPU only counts together with some output; a shell's children
 	// are its own and CPU alone is enough.
 	if s.CPUBusy && (!s.Agent || s.RecentBytes >= activityCPUOutputBytes) {
-		return "active"
+		return activityActive
 	}
 	if s.IdlePrompt {
-		return "quiet"
+		return activityQuiet
 	}
 	switch strings.ToLower(s.AgentStatus) {
 	case "waiting", "idle":
-		return "quiet"
+		return activityQuiet
 	case "":
 	default:
-		return "active"
+		return activityActive
 	}
 	if s.LastOutputAt.IsZero() {
 		return ""
 	}
 	if s.Now.Sub(s.LastOutputAt) < activeOutputWindow && s.RecentBytes >= activityOutputBytes {
-		return "active"
+		return activityActive
 	}
-	return "quiet"
+	return activityQuiet
 }
 
 // outputMeter counts bytes per second over a short sliding window.
