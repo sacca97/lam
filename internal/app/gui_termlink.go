@@ -3,6 +3,7 @@
 package app
 
 import (
+	"path"
 	"regexp"
 	"strings"
 )
@@ -141,6 +142,36 @@ func (g *guiApp) openTerminalLink(tok string) bool {
 			return true
 		}
 	}
-	g.openDocument(s.Host, absoluteDocPath(tok, s.CWD, home))
+	if home != "" || strings.HasPrefix(tok, "/") {
+		g.openDocument(s.Host, absoluteDocPath(tok, s.CWD, home))
+		return true
+	}
+	// A relative path is not always relative to the folder the session started
+	// in (an agent names a file in a subfolder, or from where it has moved to):
+	// look for it, off the UI goroutine, as the machine may be far away.
+	src := g.documentSourceFor(s.Host)
+	if src == nil {
+		g.openDocument(s.Host, absoluteDocPath(tok, s.CWD, ""))
+		return true
+	}
+	host, recorded, name := s.Host, s.CWD, s.Name
+	g.say("Looking for %s…", path.Base(tok))
+	go func() {
+		var bases []string
+		if live, err := sessionProcessWorkingDirectory(name); err == nil && live != "" {
+			bases = append(bases, live)
+		}
+		if recorded != "" && (len(bases) == 0 || bases[0] != recorded) {
+			bases = append(bases, recorded)
+		}
+		found, ok := findDocument(src, bases, tok)
+		g.onUI(func() {
+			if !ok {
+				g.say("Cannot find %s in %s or below it", tok, shortenHomePath(recorded, g.sourceFor(host)))
+				return
+			}
+			g.openDocument(host, found)
+		})
+	}()
 	return true
 }

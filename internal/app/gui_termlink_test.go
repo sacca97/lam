@@ -58,6 +58,11 @@ func TestOpenTerminalLinkResolvesInTheSessionFolder(t *testing.T) {
 	if !g.openTerminalLink("plan.md") {
 		t.Fatal("not opened")
 	}
+	d := &guiDriver{t: t, g: g}
+	for i := 0; i < 200 && g.doc == nil; i++ { // the search runs in the background
+		d.frame()
+		time.Sleep(10 * time.Millisecond)
+	}
 	waitDoc(t, g)
 	if g.doc == nil || g.doc.path != filepath.Join(dir, "plan.md") || g.doc.err != "" {
 		t.Fatalf("opened %+v", g.doc)
@@ -97,5 +102,31 @@ func TestAgentPaneHighlightsLinks(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no link was highlighted in the agent pane; rows: %v", len(g.mainView.lines))
+	}
+}
+
+// A file an agent names without its folder is found below the session's folder.
+func TestOpenTerminalLinkFindsFileInSubfolder(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "paper", "build"), 0o755)
+	os.WriteFile(filepath.Join(dir, "paper", "build", "main.md"), []byte("# deep"), 0o644)
+	e := testPane(t, 100, 30)
+	g := newTestApp(t, e)
+	g.mu.Lock()
+	for i := range g.sessions {
+		if g.sessions[i].Name == g.selected {
+			g.sessions[i].CWD = dir
+		}
+	}
+	g.mu.Unlock()
+	g.rowsVer.Add(1)
+	g.openTerminalLink("main.md")
+	d := &guiDriver{t: t, g: g}
+	for i := 0; i < 300 && g.doc == nil; i++ {
+		d.frame()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if g.doc == nil || g.doc.path != filepath.Join(dir, "paper", "build", "main.md") {
+		t.Fatalf("opened %+v", g.doc)
 	}
 }
